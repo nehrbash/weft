@@ -1,0 +1,6 @@
+#!/usr/bin/env -S guile --no-auto-compile -s
+!#
+(add-to-load-path (string-append (dirname (dirname (current-filename)))
+                                 "/modules"))
+(use-modules (weft mcp))
+(serve-stdio)
