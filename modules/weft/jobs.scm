@@ -17,7 +17,7 @@
   (closed? manager-closed? set-manager-closed!))
 
 (define-record-type <job>
-  (make-job id argv pid mutex state out err truncated? reaped? status thread)
+  (make-job id argv pid mutex state out err limit truncated? reaped? status thread)
   job?
   (id job-id)
   (argv job-argv)
@@ -26,6 +26,7 @@
   (state job-state set-job-state!)
   (out job-out set-job-out!)
   (err job-err set-job-err!)
+  (limit job-output-limit)
   (truncated? job-truncated? set-job-truncated!)
   (reaped? job-reaped? set-job-reaped!)
   (status job-exit-status set-job-exit-status!)
@@ -34,8 +35,6 @@
 (define (make-job-manager)
   "Create process-local subprocess storage; call jobs-close before exit."
   (%make-manager 1 '() #f))
-
-(define output-limit 16384)
 
 ;; Linux siginfo_t is 128 bytes; si_signo is its first int on all Linux ABIs.
 (define waitid
@@ -68,7 +67,7 @@
   (with-mutex (job-mutex job)
     (let* ((old ((if stderr? job-err job-out) job))
             (size (+ (bytevector-length old) (bytevector-length bytes)))
-            (keep (min output-limit size))
+            (keep (min (job-output-limit job) size))
             (tail (make-bytevector keep))
             (skip (- size keep))
             (old-start (min skip (bytevector-length old)))
@@ -77,7 +76,7 @@
       (bytevector-copy! old old-start tail 0 old-count)
       (bytevector-copy! bytes new-start tail old-count (- keep old-count))
       ((if stderr? set-job-err! set-job-out!) job tail)
-      (when (> size output-limit) (set-job-truncated! job #t)))))
+      (when (> size (job-output-limit job)) (set-job-truncated! job #t)))))
 
 (define (drain-job job stdout stderr)
   ;; Only subprocess I/O runs here: workspace evaluation owns SIGALRM.
@@ -146,10 +145,32 @@
                   (unless (port-closed? port) (close-port port)))
         (list stdout stderr)))))
 
-(define (job-start manager argv)
-  "Start an explicit argv with null stdin and bounded UTF-8 output tails."
+;; Guile's spawn is thread-safe; setup runs in a fresh interpreter before exec.
+(define launcher-source
+  "(catch #t
+     (lambda ()
+       (let ((args (cdr (command-line))))
+         (setpgid 0 0)
+         (chdir (car args))
+         (write-char #\\nul)
+         (force-output)
+         (apply execlp (cadr args) (cdr args))))
+     (lambda args (primitive-exit 127)))")
+
+(define (spawn-job argv cwd input stdout stderr)
+  (spawn (readlink "/proc/self/exe")
+         (append (list "guile" "-q" "--no-auto-compile" "-c" launcher-source
+                       (or cwd (getcwd))) argv)
+         #:input input #:output stdout #:error stderr #:search-path? #f))
+
+(define* (job-start manager argv #:key cwd (stdin "") (output-limit 16384))
+  "Start argv with optional CWD, bounded STDIN and UTF-8 output tails."
   (unless waitid (error "Subprocess jobs require GNU/Linux"))
   (when (manager-closed? manager) (error "Job manager is closed"))
+  (unless (and (or (not cwd) (and (string? cwd) (file-is-directory? cwd)))
+               (string? stdin) (<= (string-length stdin) 1048576)
+               (exact-integer? output-limit) (<= 1 output-limit 1048576))
+    (error "Invalid cwd, stdin (at most 1 MiB), or output limit (1..1 MiB)"))
   (unless (and (list? argv) (pair? argv) (every string? argv)
             (every (lambda (arg) (not (string-index arg #\nul))) argv)
             (not (string-null? (car argv)))
@@ -168,36 +189,30 @@
         (dynamic-wind
           (lambda () #t)
           (lambda ()
-            (let* ((stdout (new-pipe))
+            (let* ((input (mkstemp! (string-copy "/tmp/weft-input-XXXXXX")))
+                    (registered (begin
+                                  (set! ports (cons input ports))
+                                  (delete-file (port-filename input))
+                                  (put-bytevector input (string->utf8 stdin))
+                                  (seek input 0 SEEK_SET)))
+                    (stdout (new-pipe))
                     (stderr (new-pipe)))
               (for-each (lambda (port)
                           (fcntl port F_SETFD FD_CLOEXEC)
                           (setvbuf port 'none)) ports)
-              (set! pid (primitive-fork))
-              (if (= pid 0)
-                (catch #t
-                  (lambda ()
-                    (setpgid 0 0)
-                    (let ((input (open-input-file "/dev/null")))
-                      (dup2 (fileno input) 0))
-                    (dup2 (fileno (cdr stdout)) 1)
-                    (dup2 (fileno (cdr stderr)) 2)
-                    (for-each close-port ports)
-                    (apply execlp (car argv) argv))
-                  (lambda args (primitive-exit 127)))
-                (begin
+              (set! pid (spawn-job argv cwd input (cdr stdout) (cdr stderr)))
+              (begin
                   (close-port (cdr stdout))
                   (close-port (cdr stderr))
-                  (catch 'system-error
-                    (lambda () (setpgid pid pid))
-                    (lambda args
-                      (unless (memv (system-error-errno args) (list EACCES ESRCH))
-                        (apply throw args))))
+                  (close-port input)
+                  (unless (and (pair? (car (select (list (car stdout)) '() '() 5)))
+                               (equal? 0 (get-u8 (car stdout))))
+                    (error "Job launcher failed to establish its process group"))
                   (set! owned-group? #t)
                   (let* ((id (manager-next manager))
                           (new-job (make-job id (map string-copy argv) pid (make-mutex)
                                      'running (make-bytevector 0)
-                                     (make-bytevector 0) #f #f #f #f)))
+                                     (make-bytevector 0) output-limit #f #f #f #f)))
                     (set! job new-job)
                     (set-job-thread! job
                       (call-with-new-thread
@@ -206,7 +221,7 @@
                     (set-manager-next! manager (+ id 1))
                     (set-manager-jobs! manager (acons id job (manager-jobs manager)))
                     (set! committed? #t)
-                    (job-status manager id))))))
+                    (job-status manager id)))))
           (lambda ()
             (unless committed?
               (when (and pid (> pid 0))

@@ -36,17 +36,38 @@
   (and (port-closed? (car first-pipe)) (port-closed? (cdr first-pipe))))
 
 (define failed-pid #f)
-(define real-fork primitive-fork)
-(with-binding 'primitive-fork
-  (lambda () (let ((pid (real-fork))) (set! failed-pid pid) pid))
+(define real-spawn-job (module-ref jobs-module 'spawn-job))
+(with-binding 'spawn-job
+  (lambda args (let ((pid (apply real-spawn-job args))) (set! failed-pid pid) pid))
   (lambda ()
     (with-binding 'call-with-new-thread
       (lambda args (error "injected thread failure"))
       (lambda ()
         (test-error "thread setup failure" #t
           (job-start manager '("sleep" "10")))))))
+(test-assert "thread failure captured actual child" (and (integer? failed-pid) (> failed-pid 0)))
 (test-error "thread setup failure reaps child" #t (waitpid failed-pid WNOHANG))
 (test-equal "failed starts never publish jobs" '() (job-list manager))
+
+(with-binding 'spawn-job
+  (lambda (argv cwd input stdout stderr)
+    (set! failed-pid (spawn "printf" '("printf" "bad")
+                      #:input input #:output stdout #:error stderr))
+    failed-pid)
+  (lambda ()
+    (test-error "malformed launcher readiness rejected" #t (job-start manager '("true")))))
+(test-error "malformed launcher child reaped" #t (waitpid failed-pid WNOHANG))
+(test-equal "malformed launcher never publishes" '() (job-list manager))
+
+(with-binding 'primitive-fork
+  (lambda () (error "Unsafe fork must not run"))
+  (lambda ()
+    (let ((a (start "sleep" "0.05")) (b (start "printf" "concurrent")))
+      (test-equal "spawn while supervisor active" "concurrent"
+        (field (job-wait manager b 2) 'stdout))
+      (test-equal "concurrent child completes" 0 (field (job-wait manager a 2) 'exit-code))
+      (job-forget manager a)
+      (job-forget manager b))))
 
 (define signalled-before-reap? #f)
 (define real-signal-group (module-ref jobs-module 'signal-group))
@@ -108,6 +129,19 @@
 (define unicode (start "printf" "%s" "日本語 🧵"))
 (test-equal "UTF-8 output" "日本語 🧵"
   (field (job-wait manager unicode 2) 'stdout))
+
+(define input-job (field (job-start manager '("cat") #:stdin "日本語 input") 'id))
+(test-equal "explicit UTF-8 stdin" "日本語 input"
+  (field (job-wait manager input-job 2) 'stdout))
+(define cwd-job (field (job-start manager '("pwd") #:cwd "/tmp") 'id))
+(test-equal "child working directory" "/tmp\n"
+  (field (job-wait manager cwd-job 2) 'stdout))
+(define capped-job (field (job-start manager '("printf" "abcdef") #:output-limit 3) 'id))
+(test-equal "per-job capture bound" "def"
+  (field (job-wait manager capped-job 2) 'stdout))
+(test-assert "per-job truncation observable" (field (job-status manager capped-job) 'truncated))
+(test-error "invalid cwd rejected" #t (job-start manager '("true") #:cwd "/weft/absent"))
+(test-error "capture limit bounded" #t (job-start manager '("true") #:output-limit 1048577))
 
 (define orphan (start "sh" "-c" "sleep 10 & printf done"))
 (test-equal "leader exit closes descendant pipes" 'exited

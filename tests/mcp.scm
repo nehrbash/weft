@@ -1,5 +1,9 @@
 (use-modules (ice-9 popen)
              (ice-9 rdelim)
+             (weft mcp)
+             (weft runtime)
+             (weft daemon)
+             (ice-9 ftw)
              (json)
              (srfi srfi-64))
 (define root
@@ -181,5 +185,103 @@
                   (catch 'system-error
                     (lambda () (kill child-pid 0) #f)
                     (lambda args (= ESRCH (system-error-errno args))))))
+(let* ((output (open-output-string))
+       (requests
+        (string-append
+         (scm->json-string '((jsonrpc . "2.0") (id . 1) (method . "initialize"))) "\n"
+         (scm->json-string '((jsonrpc . "2.0") (id . 2) (method . "tools/call")
+                            (params (name . "evaluate") (arguments (code . "1"))))) "\n"
+         (scm->json-string '((jsonrpc . "2.0") (id . 3) (method . "ping"))) "\n")))
+  (serve-mcp (open-input-string requests) output
+             #:evaluate (lambda (code seconds) (error "Daemon unavailable")))
+  (call-with-input-string (get-output-string output)
+    (lambda (input)
+      (read-line input)
+      (let ((failure (json-string->scm (read-line input)))
+            (ping (json-string->scm (read-line input))))
+        (test-assert "forwarding failure is a tool error"
+                     (assoc-ref (assoc-ref failure "result") "isError"))
+        (test-equal "forwarding failure retains request ID" 2 (assoc-ref failure "id"))
+        (test-equal "bridge accepts requests after forwarding failure" 3 (assoc-ref ping "id"))))))
+(let ((workspace (make-workspace)))
+  (define (client code)
+    (let* ((requests
+            (string-append
+             (scm->json-string '((jsonrpc . "2.0") (id . 1) (method . "initialize"))) "\n"
+             (scm->json-string `((jsonrpc . "2.0") (id . 2) (method . "tools/call")
+                                (params (name . "evaluate") (arguments (code . ,code))))) "\n"))
+           (output (open-output-string)))
+      (serve-mcp (open-input-string requests) output
+                 #:evaluate (lambda (source seconds)
+                              (workspace-evaluate workspace source #:seconds seconds)))
+      (call-with-input-string (get-output-string output)
+        (lambda (input)
+          (read-line input)
+          (let* ((reply (json-string->scm (read-line input)))
+                 (content (assoc-ref (assoc-ref reply "result") "content")))
+            (call-with-input-string (assoc-ref (vector-ref content 0) "text") read))))))
+  (dynamic-wind
+    (lambda () #t)
+    (lambda ()
+      (let ((first (client "(define shared-value 41) (define pending (assq-ref (job-start '(\"sleep\" \"30\")) 'id)) shared-value"))
+            (second (client "(+ shared-value 1)")))
+        (test-equal "second bridge sees shared definitions" "42" (assq-ref second 'value))
+        (test-equal "bridges share workspace generation"
+                    (assq-ref first 'generation) (assq-ref second 'generation))
+        (test-equal "bridge EOF leaves shared jobs alive" "running"
+                    (assq-ref (client "(assq-ref (job-status pending) 'state)") 'value))))
+    (lambda () (workspace-close workspace))))
+(let* ((directory (mkdtemp "/tmp/weft-bridge-XXXXXX"))
+       (path (string-append directory "/workspace.sock"))
+       (child #f) (first #f) (second #f))
+  (define (bridge)
+    (open-pipe* OPEN_BOTH "guile" "--no-auto-compile" "-L"
+                (string-append root "/modules") "-s" (string-append root "/bin/weft")
+                "connect" path))
+  (dynamic-wind
+    (lambda () #t)
+    (lambda ()
+      (force-output)
+      (set! child (primitive-fork))
+      (when (zero? child)
+        (execlp "guile" "guile" "--no-auto-compile" "-L"
+                (string-append root "/modules") "-s" (string-append root "/bin/weft")
+                "daemon" path))
+      (let loop ((remaining 100))
+        (unless (and (file-exists? path)
+                     (catch #t (lambda () (remote-evaluate path "#t") #t)
+                            (lambda args #f)))
+          (when (zero? remaining) (error "Bridge fixture daemon did not start"))
+          (usleep 20000)
+          (loop (- remaining 1))))
+      (set! first (bridge))
+      (set! server first)
+      (request "initialize" '())
+      (let ((initial (evaluate "(define shared-counter 12) shared-counter")))
+        (set! second (bridge))
+        (set! server second)
+        (request "initialize" '())
+        (test-equal "second stdio process reads first process definition" 12
+                    (value "shared-counter"))
+        (test-equal "stdio processes share daemon generation"
+                    (assq-ref initial 'generation)
+                    (assq-ref (evaluate "shared-counter") 'generation))
+        (value "(set! shared-counter 13) shared-counter")
+        (set! server first)
+        (test-equal "first stdio process sees second process mutation" 13
+                    (value "shared-counter"))
+        (close-pipe first)
+        (set! first #f)
+        (set! server second)
+        (test-equal "stdio disconnect preserves daemon state" 13
+                    (value "shared-counter"))))
+    (lambda ()
+      (when first (close-pipe first))
+      (when second (close-pipe second))
+      (when child (kill child SIGTERM) (waitpid child))
+      (when (file-exists? path) (delete-file path))
+      (when (file-exists? (string-append path ".lock"))
+        (delete-file (string-append path ".lock")))
+      (rmdir directory))))
 (test-end "weft")
 (exit (if (zero? (test-runner-fail-count runner)) 0 1))

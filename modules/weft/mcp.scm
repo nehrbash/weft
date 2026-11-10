@@ -7,7 +7,7 @@
 
 (define %tool
   '((name . "evaluate")
-    (description . "Evaluate Guile Scheme in a persistent local workspace. Start with (workspace-help) and (workspace-state). Use job-start for subprocess work and job-status or bounded job-wait to inspect it. This trusted REPL runs with the local user's authority; no sandbox or approval gate. State lasts until this server process exits.")
+    (description . "Evaluate Guile Scheme in a persistent local workspace. Start with (workspace-help) and (workspace-state). Definitions, jobs and agent orchestration belong to the workspace host. This trusted REPL runs with the local user's authority; no sandbox or approval gate.")
     (inputSchema (type . "object")
                  (properties (code (type . "string")
                                    (maxLength . 131072))
@@ -30,9 +30,12 @@
   `((jsonrpc . "2.0") (id . ,id)
     (error (code . ,code) (message . ,message))))
 
-(define* (serve-mcp input output #:key (initialize (lambda (module) #t)))
-  "Serve newline-delimited MCP on INPUT and OUTPUT with process-local state."
-  (define workspace (make-workspace #:initialize initialize))
+(define* (serve-mcp input output #:key (initialize (lambda (module) #t))
+                    (evaluate #f))
+  "Serve MCP using an owned workspace or an externally owned EVALUATE callback."
+  (define workspace (and (not evaluate) (make-workspace #:initialize initialize)))
+  (define run (or evaluate (lambda (code seconds)
+                            (workspace-evaluate workspace code #:seconds seconds))))
   (define initialized? #f)
   (define (result id value)
     `((jsonrpc . "2.0") (id . ,id) (result . ,value)))
@@ -55,8 +58,8 @@
         (result id
                 '((protocolVersion . "2025-11-25")
                   (capabilities (tools (listChanged . #f)))
-                  (serverInfo (name . "weft") (version . "0.2.0"))
-                  (instructions . "Use evaluate with Scheme source. Start with (workspace-help). State is process-local; check (workspace-state) after reconnecting. Managed subprocess jobs run between evaluations. No sandbox, approval gate, shared daemon or database is implemented."))))
+                  (serverInfo (name . "weft") (version . "0.3.0"))
+                  (instructions . "Use evaluate with Scheme source. Start with (workspace-help). Check (workspace-state) after reconnecting. A shared daemon retains state across bridge connections; standalone state lasts until exit. No sandbox, approval gate or database is implemented."))))
        ((equal? method "ping") (result id '()))
        ((not initialized?) (rpc-error id -32002 "Initialize first"))
        ((equal? method "tools/list") (result id `((tools . ,(vector %tool)))))
@@ -71,7 +74,14 @@
                    (real? seconds) (> seconds 0) (<= seconds 50)
                    (every (lambda (entry)
                             (member (car entry) '("code" "seconds"))) arguments))
-              (let ((evaluation (workspace-evaluate workspace code #:seconds seconds)))
+              (let ((evaluation
+                     (catch #t
+                       (lambda () (run code seconds))
+                       (lambda (key . args)
+                         (let ((message (format #f "Workspace evaluation failed: ~s ~s" key args)))
+                           `((generation . #f) (status . error)
+                             (value . ,(substring message 0 (min 4096 (string-length message))))
+                             (output . "") (truncated . ,(> (string-length message) 4096))))))))
                 (result id
                         `((content . ,(vector `((type . "text")
                                                 (text . ,(object->string evaluation)))))
@@ -97,10 +107,11 @@
                 (scm->json reply output)
                 (newline output)
                 (force-output output)))
+            (when workspace (workspace-tick! workspace))
             (loop)))))
-    (lambda () (workspace-close workspace))))
+    (lambda () (when workspace (workspace-close workspace)))))
 
-(define* (serve-stdio #:key (initialize (lambda (module) #t)))
+(define* (serve-stdio #:key (initialize (lambda (module) #t)) (evaluate #f))
   "Serve MCP on standard I/O, isolating protocol descriptors from child processes."
   ;; Child processes must not read requests or write into the protocol stream.
   (let* ((input (fdopen (dup 0) "r"))
@@ -113,7 +124,7 @@
         (fcntl output F_SETFD FD_CLOEXEC)
         (dup2 (fileno null) 0)
         (dup2 2 1)
-        (serve-mcp input output #:initialize initialize))
+        (serve-mcp input output #:initialize initialize #:evaluate evaluate))
       (lambda ()
         (close-port null)
         (close-port input)

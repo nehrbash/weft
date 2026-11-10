@@ -2,5 +2,5 @@
 !#
 (add-to-load-path (string-append (dirname (dirname (current-filename)))
                                  "/modules"))
-(use-modules (weft mcp))
-(serve-stdio)
+(use-modules (weft cli))
+(exit (main (cdr (command-line))))

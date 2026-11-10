@@ -63,6 +63,19 @@
   (value "(assq-ref (job-status (assq-ref launched (quote id))) (quote state))"))
 (test-assert "completed job can be forgotten"
   (value "(job-forget (assq-ref launched (quote id)))"))
+(test-equal "job keyword arguments reach manager" "input"
+  (begin
+    (evaluate "(define piped (job-start (list \"cat\") #:stdin \"input\" #:cwd \"/tmp\" #:output-limit 5))")
+    (value "(assq-ref (job-wait (assq-ref piped 'id) 2) 'stdout)")))
+(evaluate "(define seen 0) (command-register! 'handler (lambda (event) (set! seen 1))) (event-on! 'fixture 'fixture 'handler) (event-emit! 'fixture #f)")
+(workspace-tick! workspace)
+(test-equal "queued hook resolves registered command" 1 (value "seen"))
+(evaluate "(define (handler event) (set! seen 2)) (event-emit! 'fixture #f)")
+(workspace-tick! workspace)
+(test-equal "redefinition changes live hook behavior" 2 (value "seen"))
+(evaluate "(event-off! 'fixture) (event-emit! 'fixture #f)")
+(workspace-tick! workspace)
+(test-equal "removed hook stops dispatch" 2 (value "seen"))
 (define other (make-room))
 (test-equal "legacy constructor creates isolated workspace" 'error
             (assq-ref (room-evaluate other "saved") 'status))

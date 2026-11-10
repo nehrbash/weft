@@ -5,15 +5,17 @@
   #:use-module (srfi srfi-9)
   #:use-module (srfi srfi-11)
   #:use-module (weft jobs)
+  #:use-module (weft orchestration)
   #:export (make-workspace workspace-evaluate workspace-help workspace-state
-            workspace-close make-room room-evaluate room-help room-state))
+            workspace-close workspace-tick! make-room room-evaluate room-help room-state))
 
 (define-record-type <workspace>
-  (%make-workspace module generation jobs)
+  (%make-workspace module generation jobs orchestration)
   workspace?
   (module workspace-module)
   (generation workspace-generation)
-  (jobs workspace-jobs))
+  (jobs workspace-jobs)
+  (orchestration workspace-orchestration))
 
 (define (bounded-output limit)
   (let ((parts '())
@@ -44,10 +46,14 @@
     (maintenance . "Import application modules and use procedure-documentation for function help.")
     (discovery . "Use module-map, module-ref and procedure-documentation on imported Guile/Guix modules.")
     (limits . "Results are bounded; retain large values in variables and return summaries. Evaluation defaults to 30 seconds, at most 50.")
-    (jobs . "Start argv with job-start; inspect with job-list and job-status; wait up to 10 seconds with job-wait; stop with job-cancel; discard finished records with job-forget. Output is bounded; jobs belong to this server process.")
+    (jobs . "Start argv with job-start; inspect with job-list and job-status; wait up to 10 seconds with job-wait; stop with job-cancel; discard finished records with job-forget. job-start accepts #:cwd, #:stdin (up to 1 MiB), and #:output-limit (1..1 MiB, default 16384). Jobs belong to this server process.")
+    (agents . "Register with (agent-register! 'helper 'codex #:cwd \"/project\") or provider 'claude; (agent-send! 'helper \"task\") returns a turn ID. Inspect agent-list, turn-list and (turn-status id); stop with (turn-cancel! id). At most four turns run, one per agent; each agent queues at most 16.")
+    (events . "Define a procedure taking an event alist, then (event-on! 'hook-name 'topic 'procedure-name). (event-emit! 'topic payload #:source 'sender #:key \"optional-dedup-key\") queues delivery. Handlers read payload with assq-ref. Symbols resolve at dispatch, so redefining the procedure changes future calls. List event-hooks; remove with event-off!. The daemon ticks while idle; standalone clients dispatch after requests.")
+    (owner . "(owner-post! \"message\" #:from 'helper) adds to the bounded owner inbox; (owner-messages last-id) reads later entries. The inbox retains 256 messages. owner-notify! accepts a callback symbol or #f; callbacks receive message alists.")
+    (commands . "(command-register! 'name procedure) installs a live command; command-list lists names and command-remove! removes one. Guile define, set!, module-ref and procedure-documentation support live replacement, wrappers and inspection. orchestration-state reports queue counts and limits.")
     (processes . "Subprocess stdout goes to server stderr unless captured. Managed jobs capture stdout and stderr separately.")
     (restart . "A new server process loses definitions and changes the generation. Save reusable code in source modules.")
-    (roadmap . "Shared sessions, browser zones, gated connectors, isolation and durable recovery are not implemented.")))
+    (roadmap . "Use the shared daemon to retain this workspace across client connections. Browser zones, gated connectors, isolation and durable recovery are not implemented.")))
 
 (define (install-bindings! workspace)
   (let ((module (workspace-module workspace))
@@ -58,7 +64,9 @@
     (bind 'workspace-help (lambda () (workspace-help workspace)))
     (bind 'room-state (module-ref module 'workspace-state))
     (bind 'room-help (module-ref module 'workspace-help))
-    (bind 'job-start (lambda (argv) (job-start manager argv)))
+    (bind 'job-start
+      (lambda* (argv #:key cwd (stdin "") (output-limit 16384))
+        (job-start manager argv #:cwd cwd #:stdin stdin #:output-limit output-limit)))
     (bind 'job-list (lambda () (job-list manager)))
     (bind 'job-status (lambda (id) (job-status manager id)))
     (bind 'job-wait (lambda* (id #:optional (seconds 1))
@@ -71,9 +79,12 @@
   (let* ((name (list 'workspace (gensym "session-")))
          (module (resolve-module name))
          (generation (format #f "~a-~a" (getpid) (gettimeofday)))
-         (workspace (%make-workspace module generation (make-job-manager))))
+         (manager (make-job-manager))
+         (orchestration (make-orchestration manager module))
+         (workspace (%make-workspace module generation manager orchestration)))
     (module-use! module (resolve-interface '(guile)))
     (install-bindings! workspace)
+    (install-orchestration-bindings! orchestration)
     (set-module-public-interface! module module)
     (catch #t
       (lambda () (initialize module))
@@ -84,7 +95,12 @@
 
 (define (workspace-close workspace)
   "Stop managed jobs and release their resources."
+  (orchestration-close! (workspace-orchestration workspace))
   (jobs-close (workspace-jobs workspace)))
+
+(define (workspace-tick! workspace)
+  "Dispatch pending orchestration on the evaluator thread."
+  (orchestration-tick! (workspace-orchestration workspace)))
 
 (define (evaluate-source workspace code result-port)
   (let* ((request `(("code" . ,code)
