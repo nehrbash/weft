@@ -100,11 +100,11 @@
                       'value))
 (test-equal "guide available in runtime"
             'ok
-            (assq-ref (evaluate "(room-help)")
+            (assq-ref (evaluate "(workspace-help)")
                       'status))
 (test-equal "runtime identity is discoverable"
             'ok
-            (assq-ref (evaluate "(room-state)")
+            (assq-ref (evaluate "(workspace-state)")
                       'status))
 (test-equal "unknown tool rejected" -32602
             (assoc-ref (assoc-ref (request "tools/call"
@@ -117,6 +117,69 @@
                                                                             (code . "1")
                                                                             (seconds . 51))))
                                   "error") "code"))
-(test-end "weft")
+(test-equal "non-object arguments rejected" -32602
+            (assoc-ref (assoc-ref (request "tools/call"
+                                           '((name . "evaluate") (arguments . 7)))
+                                  "error") "code"))
+(test-equal "false deadline rejected" -32602
+            (assoc-ref (assoc-ref (request "tools/call"
+                                           '((name . "evaluate")
+                                             (arguments (code . "1") (seconds . #f))))
+                                  "error") "code"))
+(define (value code)
+  (let ((evaluation (evaluate code)))
+    (unless (eq? 'ok (assq-ref evaluation 'status))
+      (error "Evaluation failed" evaluation))
+    (call-with-input-string (assq-ref evaluation 'value) read)))
+(test-equal "workspace command can be defined" 41
+            (value "(define (adjust n) (+ n 1)) (adjust answer)"))
+(test-equal "workspace command can be redefined across calls" 42
+            (value "(define (adjust n) (+ n 2)) (adjust answer)"))
+(let* ((path (string-copy "/tmp/weft-extension-XXXXXX"))
+       (port (mkstemp! path)))
+  (dynamic-wind
+    (lambda () #t)
+    (lambda ()
+      (display "(define (extension-answer) (adjust answer))\n" port)
+      (close-port port)
+      (test-equal "extension loads into the live workspace" 42
+                  (value (string-append "(primitive-load " (object->string path)
+                                        ") (extension-answer)")))
+      (test-equal "extension and existing state persist" '(40 42)
+                  (value "(list answer (extension-answer))")))
+    (lambda ()
+      (unless (port-closed? port) (close-port port))
+      (delete-file path))))
+(define (elapsed start)
+  (/ (- (get-internal-real-time) start) internal-time-units-per-second))
+(define started (get-internal-real-time))
+(define job (value "(define sleeper (assq-ref (job-start '(\"sleep\" \"30\")) 'id)) (job-status sleeper)"))
+(test-equal "job starts running" 'running (assq-ref job 'state))
+(test-assert "job start returns promptly" (< (elapsed started) 5))
+(test-equal "evaluation remains usable during job" 42 (value "(+ answer 2)"))
+(set! started (get-internal-real-time))
+(test-equal "bounded wait leaves job running" 'running
+            (assq-ref (value "(job-wait sleeper 0.1)") 'state))
+(test-assert "job wait returns promptly" (< (elapsed started) 5))
+(test-equal "cancel reaches terminal state" 'cancelled
+            (assq-ref (value "(job-cancel sleeper)") 'state))
+(test-assert "terminal job can be forgotten" (value "(job-forget sleeper)"))
+(test-equal "forgotten job absent" '() (value "(job-list)"))
+(define finished
+  (value "(define printer (assq-ref (job-start '(\"sh\" \"-c\" \"printf job-output; printf job-error >&2\")) 'id)) (job-wait printer 5)"))
+(test-equal "job output isolated from protocol" "job-output" (assq-ref finished 'stdout))
+(test-equal "job stderr captured" "job-error" (assq-ref finished 'stderr))
+(test-equal "successful exit reported" 0 (assq-ref finished 'exit-code))
+(test-assert "completed job can be forgotten" (value "(job-forget printer)"))
+(define shutdown-job
+  (value "(job-start '(\"sleep\" \"30\"))"))
+(define child-pid (assq-ref shutdown-job 'pid))
+(test-assert "shutdown fixture reports child PID" (integer? child-pid))
 (close-pipe server)
+(test-assert "EOF cancels and reaps managed child"
+             (and child-pid
+                  (catch 'system-error
+                    (lambda () (kill child-pid 0) #f)
+                    (lambda args (= ESRCH (system-error-errno args))))))
+(test-end "weft")
 (exit (if (zero? (test-runner-fail-count runner)) 0 1))

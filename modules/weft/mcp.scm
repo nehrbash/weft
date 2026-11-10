@@ -7,7 +7,7 @@
 
 (define %tool
   '((name . "evaluate")
-    (description . "Evaluate Guile Scheme in a persistent local workspace. Start with (room-help) and (room-state). Reuse variables and imported modules; return summaries. This trusted REPL runs with the local user's authority and has no sandbox or approval gate. Definitions last until this server process exits.")
+    (description . "Evaluate Guile Scheme in a persistent local workspace. Start with (workspace-help) and (workspace-state). Use job-start for subprocess work and job-status or bounded job-wait to inspect it. This trusted REPL runs with the local user's authority; no sandbox or approval gate. State lasts until this server process exits.")
     (inputSchema (type . "object")
                  (properties (code (type . "string")
                                    (maxLength . 131072))
@@ -21,107 +21,100 @@
                  (idempotentHint . #f)
                  (openWorldHint . #t))))
 
-(define (rpc-error id code message)
-  `((jsonrpc . "2.0") (id unquote id)
-    (error (code unquote code)
-           (message unquote message))))
+(define (object? value)
+  (and (list? value)
+       (every (lambda (entry)
+                (and (pair? entry) (string? (car entry)))) value)))
 
-(define* (serve-mcp input output
-                    #:key (initialize (lambda (module)
-                                        #t)))
+(define (rpc-error id code message)
+  `((jsonrpc . "2.0") (id . ,id)
+    (error (code . ,code) (message . ,message))))
+
+(define* (serve-mcp input output #:key (initialize (lambda (module) #t)))
   "Serve newline-delimited MCP on INPUT and OUTPUT with process-local state."
-  (define room
-    (make-room #:initialize initialize))
-  (define initialized?
-    #f)
+  (define workspace (make-workspace #:initialize initialize))
+  (define initialized? #f)
   (define (result id value)
-    `((jsonrpc . "2.0") (id unquote id)
-      (result unquote value)))
+    `((jsonrpc . "2.0") (id . ,id) (result . ,value)))
   (define (dispatch request)
     (let ((id (assoc-ref request "id"))
           (method (assoc-ref request "method"))
-          (params (or (assoc-ref request "params")
-                      '())))
+          (params (if (assoc "params" request)
+                      (assoc-ref request "params") '())))
       (cond
-        ((not (equal? (assoc-ref request "jsonrpc") "2.0"))
-         (rpc-error 'null -32600 "Expected JSON-RPC 2.0"))
-        ((not (assoc "id" request))
-         #f)
-        ((equal? method "initialize")
-         (set! initialized? #t)
-         (result id
-                 `((protocolVersion . "2025-11-25") (capabilities (tools
-                                                                         (listChanged . #f)))
-                   (serverInfo (name . "weft")
-                               (version . "0.1.0"))
-                   (instructions . "Use evaluate with Scheme source. Start with (room-help). State is process-local; check (room-state) after reconnecting. No browser, sandbox, shared server or durable state is implemented."))))
-        ((equal? method "ping")
-         (result id
-                 '()))
-        ((not initialized?)
-         (rpc-error id -32002 "Initialize first"))
-        ((equal? method "tools/list")
-         (result id
-                 `((tools unquote
-                          (vector %tool)))))
-        ((equal? method "tools/call")
-         (let* ((arguments (or (assoc-ref params "arguments")
-                               '()))
-                (code (assoc-ref arguments "code"))
-                (seconds (or (assoc-ref arguments "seconds") 30)))
-           (if (and (equal? (assoc-ref params "name") "evaluate")
-                    (string? code)
-                    (<= (string-length code) 131072)
-                    (real? seconds)
-                    (> seconds 0)
-                    (<= seconds 50)
-                    (every (lambda (entry)
-                             (member (car entry)
-                                     '("code" "seconds"))) arguments))
-               (let ((evaluation (room-evaluate room code
-                                                #:seconds seconds)))
-                 (result id
-                         `((content unquote
-                                    (vector `((type . "text") (text unquote
-                                                                    (object->string
-                                                                     evaluation)))))
-                           (isError unquote
-                                    (not (eq? 'ok
-                                              (assq-ref evaluation
-                                                        'status)))))))
-               (rpc-error id -32602
-                          "Expected evaluate with code and optional seconds"))))
-        (else (rpc-error id -32601 "Unknown method")))))
-  (let loop
-    ()
-    (let ((line (read-line input)))
-      (unless (eof-object? line)
-        (let ((reply (catch #t
-                            (lambda ()
-                              (let ((request (json-string->scm line)))
-                                (if (and (list? request)
-                                         (every pair? request))
-                                    (dispatch request)
-                                    (rpc-error 'null -32600
-                                               "Expected one request object"))))
-                            (lambda (key . args)
-                              (rpc-error 'null -32700 "Invalid request")))))
-          (when reply
-            (scm->json reply output)
-            (newline output)
-            (force-output output)))
-        (loop)))))
+       ((or (not (equal? (assoc-ref request "jsonrpc") "2.0"))
+            (not (string? method))
+            (and (assoc "id" request)
+                 (not (or (string? id) (number? id) (eq? id 'null)))))
+        (rpc-error 'null -32600 "Expected a JSON-RPC 2.0 request"))
+       ((not (assoc "id" request)) #f)
+       ((not (object? params))
+        (rpc-error id -32602 "Expected object parameters"))
+       ((equal? method "initialize")
+        (set! initialized? #t)
+        (result id
+                '((protocolVersion . "2025-11-25")
+                  (capabilities (tools (listChanged . #f)))
+                  (serverInfo (name . "weft") (version . "0.2.0"))
+                  (instructions . "Use evaluate with Scheme source. Start with (workspace-help). State is process-local; check (workspace-state) after reconnecting. Managed subprocess jobs run between evaluations. No sandbox, approval gate, shared daemon or database is implemented."))))
+       ((equal? method "ping") (result id '()))
+       ((not initialized?) (rpc-error id -32002 "Initialize first"))
+       ((equal? method "tools/list") (result id `((tools . ,(vector %tool)))))
+       ((equal? method "tools/call")
+        (let* ((arguments (assoc-ref params "arguments"))
+               (code (and (object? arguments) (assoc-ref arguments "code")))
+               (seconds (if (and (object? arguments) (assoc "seconds" arguments))
+                            (assoc-ref arguments "seconds") 30)))
+          (if (and (equal? (assoc-ref params "name") "evaluate")
+                   (object? arguments) (string? code)
+                   (<= (string-length code) 131072)
+                   (real? seconds) (> seconds 0) (<= seconds 50)
+                   (every (lambda (entry)
+                            (member (car entry) '("code" "seconds"))) arguments))
+              (let ((evaluation (workspace-evaluate workspace code #:seconds seconds)))
+                (result id
+                        `((content . ,(vector `((type . "text")
+                                                (text . ,(object->string evaluation)))))
+                          (isError . ,(not (eq? 'ok (assq-ref evaluation 'status)))))))
+              (rpc-error id -32602 "Expected evaluate with code and optional seconds"))))
+       (else (rpc-error id -32601 "Unknown method")))))
+  (dynamic-wind
+    (lambda () #t)
+    (lambda ()
+      (let loop ()
+        (let ((line (read-line input)))
+          (unless (eof-object? line)
+            (let* ((request (catch #t
+                              (lambda () (json-string->scm line))
+                              (lambda args 'parse-error)))
+                   (reply (cond
+                           ((eq? request 'parse-error)
+                            (rpc-error 'null -32700 "Invalid JSON"))
+                           ((not (object? request))
+                            (rpc-error 'null -32600 "Expected one request object"))
+                           (else (dispatch request)))))
+              (when reply
+                (scm->json reply output)
+                (newline output)
+                (force-output output)))
+            (loop)))))
+    (lambda () (workspace-close workspace))))
 
-(define* (serve-stdio #:key (initialize (lambda (module)
-                                          #t)))
+(define* (serve-stdio #:key (initialize (lambda (module) #t)))
   "Serve MCP on standard I/O, isolating protocol descriptors from child processes."
   ;; Child processes must not read requests or write into the protocol stream.
   (let* ((input (fdopen (dup 0) "r"))
          (output (fdopen (dup 1) "w"))
          (null (open-input-file "/dev/null")))
-    (fcntl input F_SETFD FD_CLOEXEC)
-    (fcntl output F_SETFD FD_CLOEXEC)
-    (dup2 (fileno null) 0)
-    (dup2 2 1)
-    (serve-mcp input output
-               #:initialize initialize)))
+    (dynamic-wind
+      (lambda () #t)
+      (lambda ()
+        (fcntl input F_SETFD FD_CLOEXEC)
+        (fcntl output F_SETFD FD_CLOEXEC)
+        (dup2 (fileno null) 0)
+        (dup2 2 1)
+        (serve-mcp input output #:initialize initialize))
+      (lambda ()
+        (close-port null)
+        (close-port input)
+        (close-port output)))))

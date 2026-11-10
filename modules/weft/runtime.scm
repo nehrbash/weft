@@ -1,154 +1,136 @@
 (define-module (weft runtime)
   #:use-module (ares evaluation eval)
   #:use-module (ice-9 sandbox)
-  #:use-module (ice-9 match)
   #:use-module (rnrs io ports)
-  #:export (make-room room-evaluate))
+  #:use-module (srfi srfi-9)
+  #:use-module (srfi srfi-11)
+  #:use-module (weft jobs)
+  #:export (make-workspace workspace-evaluate workspace-help workspace-state
+            workspace-close make-room room-evaluate room-help room-state))
+
+(define-record-type <workspace>
+  (%make-workspace module generation jobs)
+  workspace?
+  (module workspace-module)
+  (generation workspace-generation)
+  (jobs workspace-jobs))
 
 (define (bounded-output limit)
   (let ((parts '())
         (size 0)
         (truncated? #f))
-    (values (make-custom-textual-output-port "bounded-result"
-                                             (lambda (text start count)
-                                               (let ((keep (min count
-                                                                (- limit size))))
-                                                 (when (> keep 0)
-                                                   (set! parts
-                                                         (cons (substring text
-                                                                start
-                                                                (+ start keep))
-                                                               parts))
-                                                   (set! size
-                                                         (+ size keep)))
-                                                 (when (< keep count)
-                                                   (set! truncated? #t)) count))
-                                             #f #f #f)
-            (lambda ()
-              (string-concatenate (reverse parts)))
-            (lambda ()
-              truncated?))))
+    (define (write-part text start count)
+      (let ((keep (min count (- limit size))))
+        (when (> keep 0)
+          (set! parts (cons (substring text start (+ start keep)) parts))
+          (set! size (+ size keep)))
+        (when (< keep count)
+          (set! truncated? #t))
+        count))
+    (values (make-custom-textual-output-port "bounded-result" write-part #f #f #f)
+            (lambda () (string-concatenate (reverse parts)))
+            (lambda () truncated?))))
 
-(define* (make-room #:key (initialize (lambda (module)
-                                        #t)))
+(define (workspace-state workspace)
+  "Return workspace identity and persistence boundaries."
+  `((generation . ,(workspace-generation workspace))
+    (persistence . process)
+    (authority . local-user)
+    (sandbox . #f)))
+
+(define (workspace-help workspace)
+  "Describe the workspace and its built-in procedures."
+  '((evaluate . "Definitions survive calls in this process. Exceptions preserve earlier effects; there is no rollback.")
+    (maintenance . "Import application modules and use procedure-documentation for function help.")
+    (discovery . "Use module-map, module-ref and procedure-documentation on imported Guile/Guix modules.")
+    (limits . "Results are bounded; retain large values in variables and return summaries. Evaluation defaults to 30 seconds, at most 50.")
+    (jobs . "Start argv with job-start; inspect with job-list and job-status; wait up to 10 seconds with job-wait; stop with job-cancel; discard finished records with job-forget. Output is bounded; jobs belong to this server process.")
+    (processes . "Subprocess stdout goes to server stderr unless captured. Managed jobs capture stdout and stderr separately.")
+    (restart . "A new server process loses definitions and changes the generation. Save reusable code in source modules.")
+    (roadmap . "Shared sessions, browser zones, gated connectors, isolation and durable recovery are not implemented.")))
+
+(define (install-bindings! workspace)
+  (let ((module (workspace-module workspace))
+        (manager (workspace-jobs workspace)))
+    (define (bind name procedure)
+      (module-define! module name procedure))
+    (bind 'workspace-state (lambda () (workspace-state workspace)))
+    (bind 'workspace-help (lambda () (workspace-help workspace)))
+    (bind 'room-state (module-ref module 'workspace-state))
+    (bind 'room-help (module-ref module 'workspace-help))
+    (bind 'job-start (lambda (argv) (job-start manager argv)))
+    (bind 'job-list (lambda () (job-list manager)))
+    (bind 'job-status (lambda (id) (job-status manager id)))
+    (bind 'job-wait (lambda* (id #:optional (seconds 1))
+                      (job-wait manager id seconds)))
+    (bind 'job-cancel (lambda (id) (job-cancel manager id)))
+    (bind 'job-forget (lambda (id) (job-forget manager id)))))
+
+(define* (make-workspace #:key (initialize (lambda (module) #t)))
   "Create a trusted, process-local Scheme workspace."
-  (let* ((name (list 'room
-                     (string->symbol (symbol->string (gensym "session-")))))
+  (let* ((name (list 'workspace (gensym "session-")))
          (module (resolve-module name))
-         (generation (format #f "~a-~a"
-                             (getpid)
-                             (gettimeofday))))
-    (module-use! module
-                 (resolve-interface '(guile)))
-    (module-define! module
-                    'room-state
-                    (lambda ()
-                      `((generation unquote generation)
-                        (persistence . process)
-                        (authority . local-user)
-                        (sandbox . #f))))
-    (module-define! module
-                    'room-help
-                    (lambda ()
-                      '((evaluate . "Definitions survive calls in this process. Exceptions preserve earlier effects; there is no rollback.")
-                        (maintenance . "Import application modules and use procedure-documentation for function help.")
-                        (discovery . "Use module-map, module-ref and procedure-documentation on imported Guile/Guix modules.")
-                        (limits . "Results are bounded; retain large values in variables and return summaries. Evaluation defaults to 30 seconds, at most 50.")
-                        (processes . "Subprocess stdout goes to server stderr; capture subprocess output explicitly when needed.")
-                        (restart . "A new server process loses definitions and changes the generation. Save reusable code in source modules.")
-                        (roadmap . "Shared sessions, browser zones, gated connectors, isolation and durable recovery are not implemented."))))
+         (generation (format #f "~a-~a" (getpid) (gettimeofday)))
+         (workspace (%make-workspace module generation (make-job-manager))))
+    (module-use! module (resolve-interface '(guile)))
+    (install-bindings! workspace)
     (set-module-public-interface! module module)
-    (initialize module)
-    (cons module generation)))
+    (catch #t
+      (lambda () (initialize module))
+      (lambda (key . args)
+        (workspace-close workspace)
+        (apply throw key args)))
+    workspace))
 
-(define* (room-evaluate room code
-                        #:key (seconds 30)
-                        (limit 16000))
-  "Evaluate CODE in ROOM and return bounded Scheme result and output fields."
+(define (workspace-close workspace)
+  "Stop managed jobs and release their resources."
+  (jobs-close (workspace-jobs workspace)))
+
+(define (evaluate-source workspace code result-port)
+  (let* ((request `(("code" . ,code)
+                    ("ns" . ,(object->string
+                              (module-name (workspace-module workspace))))))
+         (result ((evaluation-thunk request)))
+         (kind (assq-ref result 'result-type)))
+    (case kind
+      ((value multiple-values)
+       (write (assq-ref result 'eval-value) result-port)
+       'ok)
+      (else
+       (write (assq-ref result 'exception-value) result-port)
+       'error))))
+
+(define (evaluate-with-ports workspace code seconds output result-port)
+  (call-with-time-limit
+   seconds
+   (lambda ()
+     (parameterize ((current-output-port output)
+                    (current-error-port output)
+                    (current-warning-port output)
+                    (current-input-port (open-input-string "")))
+       (evaluate-source workspace code result-port)))
+   (lambda () 'timeout)))
+
+(define* (workspace-evaluate workspace code #:key (seconds 30) (limit 16000))
+  "Evaluate CODE and return bounded Scheme result and output fields."
   (unless (and (string? code)
                (<= (string-length code) 131072)
                (real? seconds)
                (> seconds 0)
                (<= seconds 50))
     (error "Expected Scheme source up to 128 KiB and timeout in (0, 50]"))
-  (call-with-values (lambda ()
-                      (bounded-output limit))
-                    (lambda (output output-text output-truncated?)
-                      (call-with-values (lambda ()
-                                          (bounded-output limit))
-                                        (lambda (result-port result-text
-                                                 result-truncated?)
-                                          (let ((status 'ok))
-                                            (call-with-time-limit seconds
-                                                                  (lambda ()
-                                                                    (parameterize
-                                                                                  (
-                                                                                   (current-output-port
-                                                                                    output)
+  (let-values (((output output-text output-truncated?) (bounded-output limit))
+               ((result-port result-text result-truncated?) (bounded-output limit)))
+    (let ((status (evaluate-with-ports workspace code seconds output result-port)))
+      (force-output output)
+      (force-output result-port)
+      `((generation . ,(workspace-generation workspace))
+        (status . ,status)
+        (value . ,(result-text))
+        (output . ,(output-text))
+        (truncated . ,(or (output-truncated?) (result-truncated?)))))))
 
-
-                                                                                   (current-error-port
-                                                                                    output)
-
-
-                                                                                   (current-warning-port
-                                                                                    output)
-
-
-                                                                                   (current-input-port
-                                                                                    (open-input-string
-                                                                                     "")))
-                                                                      (let* ((result
-                                                                              (
-                                                                               (evaluation-thunk `
-                                                                                (
-                                                                                 ("code"
-                                                                                  unquote
-                                                                                  code)
-
-
-                                                                                 ("ns"
-                                                                                  unquote
-
-
-                                                                                  (object->string
-                                                                                   (module-name
-                                                                                    (car
-                                                                                     room))))))))
-                                                                             (kind
-                                                                              (assq-ref
-                                                                               result
-                                                                               'result-type)))
-                                                                        (case kind
-                                                                          ((value
-                                                                            multiple-values)
-                                                                           (write
-                                                                            (assq-ref
-                                                                             result
-                                                                             'eval-value)
-                                                                            result-port))
-                                                                          (else
-                                                                           (set!
-                                                                            status
-                                                                            'error)
-                                                                           (write
-                                                                            (assq-ref
-                                                                             result
-                                                                             'exception-value)
-                                                                            result-port))))))
-                                                                  (lambda ()
-                                                                    (set!
-                                                                     status
-                                                                     'timeout)))
-                                            (force-output output)
-                                            (force-output result-port)
-                                            `((generation unquote
-                                                          (cdr room))
-                                              (status unquote status)
-                                              (value unquote
-                                                     (result-text))
-                                              (output unquote
-                                                      (output-text))
-                                              (truncated unquote
-                                                         (or (output-truncated?)
-                                                             (result-truncated?))))))))))
+(define make-room make-workspace)
+(define room-evaluate workspace-evaluate)
+(define room-help workspace-help)
+(define room-state workspace-state)
