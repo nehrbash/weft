@@ -31,12 +31,16 @@
     (error (code . ,code) (message . ,message))))
 
 (define* (serve-mcp input output #:key (initialize (lambda (module) #t))
-                    (evaluate #f))
+                    (evaluate #f) isolated?)
   "Serve MCP using an owned workspace or an externally owned EVALUATE callback."
   (define workspace (and (not evaluate) (make-workspace #:initialize initialize)))
   (define run (or evaluate (lambda (code seconds)
                             (workspace-evaluate workspace code #:seconds seconds))))
   (define initialized? #f)
+  (define description
+    (if isolated?
+        "Evaluate restricted Scheme in a shared Bubblewrap-isolated room. Use workspace-help and workspace-state. saved-define!/saved-set! persist explicit definitions and values; zone-set! publishes typed zones. effect-propose! requests notify/write-file/run/session-send effects for exact-content owner approval; agents cannot approve through this evaluator."
+        (assq-ref %tool 'description)))
   (define (result id value)
     `((jsonrpc . "2.0") (id . ,id) (result . ,value)))
   (define (dispatch request)
@@ -56,13 +60,14 @@
        ((equal? method "initialize")
         (set! initialized? #t)
         (result id
-                '((protocolVersion . "2025-11-25")
+                `((protocolVersion . "2025-11-25")
                   (capabilities (tools (listChanged . #f)))
-                  (serverInfo (name . "weft") (version . "0.3.0"))
-                  (instructions . "Use evaluate with Scheme source. Start with (workspace-help). Check (workspace-state) after reconnecting. A shared daemon retains state across bridge connections; standalone state lasts until exit. No sandbox, approval gate or database is implemented."))))
+                  (serverInfo (name . "weft") (version . "0.4.0"))
+                  (instructions . ,description))))
        ((equal? method "ping") (result id '()))
        ((not initialized?) (rpc-error id -32002 "Initialize first"))
-       ((equal? method "tools/list") (result id `((tools . ,(vector %tool)))))
+       ((equal? method "tools/list")
+        (result id `((tools . ,(vector (acons 'description description (alist-delete 'description %tool)))))))
        ((equal? method "tools/call")
         (let* ((arguments (assoc-ref params "arguments"))
                (code (and (object? arguments) (assoc-ref arguments "code")))
@@ -111,7 +116,7 @@
             (loop)))))
     (lambda () (when workspace (workspace-close workspace)))))
 
-(define* (serve-stdio #:key (initialize (lambda (module) #t)) (evaluate #f))
+(define* (serve-stdio #:key (initialize (lambda (module) #t)) (evaluate #f) isolated?)
   "Serve MCP on standard I/O, isolating protocol descriptors from child processes."
   ;; Child processes must not read requests or write into the protocol stream.
   (let* ((input (fdopen (dup 0) "r"))
@@ -124,7 +129,7 @@
         (fcntl output F_SETFD FD_CLOEXEC)
         (dup2 (fileno null) 0)
         (dup2 2 1)
-        (serve-mcp input output #:initialize initialize #:evaluate evaluate))
+        (serve-mcp input output #:initialize initialize #:evaluate evaluate #:isolated? isolated?))
       (lambda ()
         (close-port null)
         (close-port input)

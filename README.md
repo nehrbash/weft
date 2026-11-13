@@ -105,7 +105,7 @@ enters the inbox. There is no automatic retry or durable delivery guarantee.
 
 ## Embedding and boundaries
 
-Dependencies are Guile 3, guile-ares-rs and guile-json; Cellar supplies
+Dependencies are Guile 3, guile-ares-rs, guile-json and guile-websocket; Cellar supplies
 `guile-weft`. `(weft cli)` exports `main` with `#:initialize`, receiving the
 workspace module at creation. `(weft runtime)` exports `make-workspace`,
 `workspace-evaluate`, `workspace-tick!` and `workspace-close`. `(weft mcp)` accepts
@@ -113,10 +113,97 @@ an externally owned `#:evaluate` callback taking code and seconds.
 
 MCP 2025-11-25 accepts `code` and optional `seconds`, defaulting to 30 and limited
 to 50. Output is bounded. Evaluation deadlines are cooperative and do not roll
-back effects or cancel jobs. This trusted local runtime has no sandbox, approval
-gate or database. State, queues, hooks, agent registrations and owner messages
-are lost on host restart; `workspace-state` reports a new generation. Provider
-CLI histories have their own persistence. Save reusable Scheme in source files.
-Weft-specific advice APIs and interactive-session wakeup adapters are not implemented.
+back effects or cancel jobs. The maintenance REPL has local-user authority;
+the isolated room below is a separate endpoint. Neither protects against a
+host process already running with the owner's account privileges.
+
+## Recovery and advice
+
+Set `WEFT_STATE_FILE` to a file in a private directory before starting `weft daemon`.
+Snapshots are written atomically before replies. Explicit definitions, values,
+zones, advice, event hooks, agent session IDs and inbox messages survive restart.
+Pending turns become `interrupted`; queued events and external effects are not
+replayed. A generation change identifies a new runtime. Jobs and ordinary heap
+values are process-local.
+
+```scheme
+(saved-define! 'double '(lambda (x) (* x 2)))
+(saved-set! 'count 21)
+(saved-list)
+(saved-remove! 'count)
+(define (trace-evaluation code) (display "evaluating\n"))
+(advice-add! 'trace 'workspace-evaluate 'before 'trace-evaluation)
+(advice-list)
+(advice-remove! 'trace)
+```
+
+Saved expressions run during recovery; keep them free of external effects.
+Use `saved-set!` again to persist an updated value. `before`, `after` and `around`
+advice resolve named procedures at invocation. Around advice receives a
+zero-argument continuation followed by the original arguments. Targets include
+`workspace-evaluate`, `workspace-tick`, and names invoked through `command-invoke`
+or event dispatch. Save advised procedures explicitly for restart recovery.
+
+## Isolated room and owner console
+
+```sh
+weft room-daemon
+weft connect-room
+weft room-eval '(zone-set! (quote status) (quote text) "Ready")'
+weft owner view
+```
+
+The room requires Linux user namespaces and Bubblewrap. Its long-lived worker
+has restricted Scheme bindings, read-only runtime sources and `/gnu/store`, a
+private temporary directory, and isolated process/network namespaces. It has no
+home directory, owner token, session bus, or host workspace socket. Evaluation
+has allocation and time limits; the worker has a 1 GiB address-space ceiling.
+The host broker stores explicit definitions, values and zones under
+`$XDG_STATE_HOME/weft/room.scm` (default `~/.local/state/weft/room.scm`).
+Ordinary definitions survive connections but not worker restarts.
+
+Load `elisp/weft.el` and run `M-x weft-console`. The Guix package installs it
+on Emacs's site load path. The native console renders text, metrics, tables and
+wiring, lets the owner reorder zones, and shows exact effect requests with
+Approve/Reject controls. `g` refreshes, `e` evaluates Scheme, `m` moves a zone
+first, and `s` lists existing sessions. Rendering never evaluates zone content.
+
+```scheme
+(zone-set! 'counts 'table '(("State" "Count") ("Ready" 3)))
+(zone-set! 'flow 'wiring '(("build" "review") ("review" "owner")))
+(effect-propose! 'notify "Build completed")
+(effect-propose! 'write-file '("/absolute/new-file.txt" "Exact contents\n"))
+(effect-propose! 'run '("/absolute/project" ("make" "check")))
+(effect-propose! 'session-send '("codex:THREAD-ID" "Inspect the failed build"))
+```
+
+Proposals cannot execute from the isolated evaluator. Owner decisions use a
+private 256-bit capability held outside the worker and must match the entire
+immutable proposal. Each approval is single-use. The broker records `executing`
+before calling a connector; interrupted effects require a fresh owner decision
+on a new proposal. Creation of files is exclusive: existing files are never
+overwritten. Commands use literal argv, run for at most 40 seconds and return
+bounded output. Archive decided requests from the console to free history space.
+
+The CLI alternative is `weft owner approve ID '(TYPE PAYLOAD)'` or `reject`.
+`weft owner inspect` returns the snapshot; `weft owner view` returns JSON.
+Owner credentials are local-user capabilities, not protection against other
+programs running as that user. Do not give isolated clients the maintenance
+endpoint or owner-token file.
+
+## Existing sessions and completion messages
+
+`session-send` accepts an existing Emacs ACP buffer name or `codex:THREAD-ID`.
+ACP delivery preserves unsent user input and queues behind busy turns. Native
+Codex delivery uses its existing app-server control socket and task queue,
+without replacing the model or permissions. It does not type into terminals.
+`weft codex-list` lists native tasks; the console lists both adapter types.
+Sending to a session is an approved effect; receipt means queued, not completed.
+
+Configure a Claude or Codex `Stop` command hook as `weft notify-hook claude` or
+`weft notify-hook codex`. The hook consumes JSON on stdin and posts a bounded
+completion message to the maintenance workspace's owner inbox. Configure
+`owner-notify!` there for desktop delivery. Merely connecting an MCP client
+does not enable automatic completion messages.
 
 GPL-3.0-or-later. See `LICENSE`.

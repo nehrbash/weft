@@ -60,9 +60,10 @@
              (code (assoc-ref request "code"))
              (seconds (if (assoc "seconds" request)
                           (assoc-ref request "seconds") 30)))
-        (let* ((result (workspace-evaluate workspace code #:seconds seconds))
+        (let* ((result (if (procedure? workspace) (workspace code seconds)
+                           (workspace-evaluate workspace code #:seconds seconds)))
                (status (assq-ref result 'status)))
-          (workspace-tick! workspace)
+          (unless (procedure? workspace) (workspace-tick! workspace))
           (reply-bytes `((result . ,(acons 'status (symbol->string status)
                                           (alist-delete 'status result eq?))))))))
     (lambda args
@@ -140,7 +141,8 @@
                   (apply throw args)))))
         (lambda () (close-port probe))))))
 
-(define* (serve-workspace path #:key (initialize (lambda (module) #t)))
+(define* (serve-workspace path #:key (initialize (lambda (module) #t)) state-file isolated?
+                          evaluator (finalize (lambda () #t)))
   "Serve one persistent workspace over a private GNU/Linux Unix socket."
   (prepare-directory! path)
   (let ((lock (fdopen (open-fdes (string-append path ".lock")
@@ -154,7 +156,9 @@
         (fcntl lock F_SETFD FD_CLOEXEC)
         (flock lock (logior LOCK_EX LOCK_NB))
         (remove-stale-socket! path)
-        (set! workspace (make-workspace #:initialize initialize))
+        (set! workspace (or evaluator
+                           (make-workspace #:initialize initialize #:state-file state-file
+                                           #:isolated? isolated?)))
         (set! listener (socket AF_UNIX SOCK_STREAM 0))
         (nonblocking! listener)
         (bind listener AF_UNIX path)
@@ -189,7 +193,7 @@
                           (if (handle-client! workspace client readable writable)
                               #t
                               (begin (close-port (client-port client)) #f))) clients))
-              (workspace-tick! workspace)
+              (unless (procedure? workspace) (workspace-tick! workspace))
               (loop)))))
       (lambda ()
         (for-each (lambda (entry)
@@ -197,7 +201,8 @@
         (for-each (lambda (client) (close-port (client-port client))) clients)
         (when listener (close-port listener))
         (when bound? (delete-file path))
-        (when workspace (workspace-close workspace))
+        (when (and workspace (not (procedure? workspace))) (workspace-close workspace))
+        (finalize)
         (close-port lock)))))
 
 (define* (remote-evaluate path code #:key (seconds 30))
@@ -242,7 +247,8 @@
                                (let ((value (assoc-ref result (symbol->string key))))
                                  (cons key (if (eq? key 'status)
                                                (string->symbol value) value))))
-                             '(generation status value output truncated))
+                             (filter (lambda (key) (assoc (symbol->string key) result))
+                                     '(generation status value output truncated saved zones advice effects proposals)))
                         (error (assoc-ref reply "error"))))
                   (loop chunks total))))))
       (lambda () (close-port port)))))

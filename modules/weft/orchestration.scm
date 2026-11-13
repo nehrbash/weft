@@ -6,7 +6,8 @@
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-9)
   #:export (make-orchestration install-orchestration-bindings!
-            orchestration-tick! orchestration-close!))
+            orchestration-tick! orchestration-close!
+            orchestration-snapshot orchestration-restore!))
 
 (define-record-type <orchestration>
   (%make-orchestration manager module next agents turns events seen hooks messages
@@ -167,7 +168,8 @@
     (lambda ()
       (let ((procedure (module-ref (workspace-module state) command)))
         (unless (procedure? procedure) (error "Command is not a procedure" command))
-        (procedure argument)))
+        (let ((dispatch (module-ref (workspace-module state) 'command-invoke #f)))
+          (if dispatch (dispatch command argument) (procedure argument)))))
     (lambda () (error "Command exceeded one second" command))))
 
 (define (dispatch-event! state event)
@@ -286,6 +288,27 @@
     (set-closed! state #t))
   #t)
 
+(define (orchestration-snapshot state)
+  (copy-tree `((next . ,(next-id state)) (agents . ,(agents state))
+               (turns . ,(turns state)) (seen . ,(seen state))
+               (messages . ,(messages state)) (hooks . ,(hooks state))
+               (commands . ,(commands state)))))
+
+(define (orchestration-restore! state snapshot)
+  (set-next-id! state (assq-ref snapshot 'next))
+  (set-agents! state (assq-ref snapshot 'agents))
+  (set-turns! state (assq-ref snapshot 'turns))
+  (set-seen! state (assq-ref snapshot 'seen))
+  (set-messages! state (assq-ref snapshot 'messages))
+  (set-hooks! state (or (assq-ref snapshot 'hooks) '()))
+  (set-commands! state (or (assq-ref snapshot 'commands) '()))
+  (for-each
+    (lambda (entry)
+      (when (active? (cdr entry))
+        (finish! state (cdr entry) 'interrupted #f
+                 "Workspace restarted; turn was not replayed")))
+    (turns state)))
+
 (define (install-orchestration-bindings! state)
   (define (bind name procedure) (module-define! (workspace-module state) name procedure))
   (bind 'agent-register! (lambda* (name provider #:key (cwd (getcwd)))
@@ -325,4 +348,6 @@
   (bind 'orchestration-state
     (lambda () `((agents . ,(length (agents state))) (turns . ,(length (turns state)))
                  (queued-events . ,(length (events state))) (messages . ,(length (messages state)))
-                 (persistence . process) (dedup-window . 256) (concurrency . 4)))))
+                 (persistence . ,(let ((inspect (module-ref (workspace-module state) 'workspace-state #f)))
+                                   (if inspect (assq-ref (inspect) 'persistence) 'process)))
+                 (dedup-window . 256) (concurrency . 4)))))
