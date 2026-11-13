@@ -73,6 +73,49 @@ bridge leaves its shared workspace running. Stopping the host closes its jobs.
 
 ## Jobs and agents
 
+The trusted endpoint discovers existing native sessions without starting turns:
+
+```scheme
+(session-list #:status 'active #:fields '(id cwd request))
+(session-ref "codex:THREAD-ID" #:fields '(status request reply association))
+(define baseline (session-changes #:fields '(id status request)))
+(session-changes (assq-ref baseline 'cursor) #:fields '(id status request))
+```
+
+`session-list` returns `sessions` and `warnings`; `session-ref` returns `session`
+(or `#f`) and `warnings`. Optional `#:provider` selects `claude`, `codex`, or
+`process`; `#:status` takes a symbol. `#:fields` selects from `id`, `provider`,
+`source`, `pid`, `name`, `cwd`, `status`, `updated-at`, `note`, `request`, `reply`,
+`request-at`, `reply-at`, `turn`, `association`, and `transcript`.
+Metadata-only selections skip transcripts. A direct Codex lookup reads one thread.
+`agent-list` separately lists Weft's registered agents.
+
+`session-changes` returns `changed`, `removed`, `warnings`, and a new `cursor`.
+The first call returns a baseline; subsequent calls compare the selected fields
+and always include `id`. Reuse identical query options with a cursor. Each
+workspace retains 32 snapshots; expired, foreign, or restarted cursors fail
+explicitly. Omit the cursor to establish a new baseline. A provider failure
+preserves its previous rows instead of reporting false removals.
+
+Warnings identify provider, operation, target, error kind, and a bounded message.
+One failed thread does not discard successful reads. Status is native metadata;
+excerpts are not inferred task summaries. A new request clears the previous
+reply. `association` distinguishes matching native `turn` IDs from `sequence`
+ordering, `pending` requests, `unpaired` replies, and `unknown` history.
+
+Transcript caches retain up to 128 paths per workspace. Reads use unchanged-file
+metadata and append offsets; inode changes, observed truncation, rewrites, and
+changed boundary bytes invalidate the cache. Each read is bounded to 1 MiB.
+`transcript` reports `complete`, `partial`, or `unavailable`; an absent excerpt
+does not mean there is no task. `updated-at` uses Unix seconds; excerpt timestamps
+retain the native format. Caches and cursors are disposable and not snapshotted.
+
+Claude discovery checks PID start times. The `process` provider reports unresolved
+Codex terminals as `unknown`; these may overlap app-server threads and are not
+evidence of additional active agents. For embedding or tests, construct
+`make-session-inspector` with `#:claude-home`, `#:proc`, and `#:connect`, then pass
+it as `#:inspector`. Normal workspace calls share a private inspector automatically.
+
 ```scheme
 (define build (assq-ref (job-start '("make" "check")) 'id))
 (job-status build)

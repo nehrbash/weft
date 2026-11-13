@@ -5,6 +5,7 @@
   #:use-module (srfi srfi-9)
   #:use-module (srfi srfi-11)
   #:use-module (weft jobs)
+  #:use-module (weft discovery)
   #:use-module (weft orchestration)
   #:use-module (weft state)
   #:use-module (weft advice)
@@ -79,7 +80,8 @@
         '((authority . "Trusted local-user REPL. It is not protected by the isolated room's approval gate.")
           (tools . "(tool-define! 'name \"description\" procedure #:properties '((arg (type . \"string\") (description . \"...\"))) #:required '(arg)) exposes PROCEDURE as a typed MCP tool beside evaluate. Types: string, integer, number, boolean; a string may add (enum . #(\"a\" \"b\")). Arguments pass positionally in property order; trailing absent ones are dropped. tool-list and tool-remove! inspect and remove; tool-call invokes one as MCP would. Tools are not snapshotted: define them from the initializer.")
           (jobs . "job-start takes argv with optional cwd, stdin and output-limit. job-status/job-list inspect; job-wait waits up to 10 seconds; job-cancel stops; job-forget removes completed jobs.")
-          (agents . "agent-list discovers registered names. agent-register! takes a name, codex/claude provider and optional cwd. agent-send! starts or queues a FUTURE turn, not an in-turn message: use message-post! for routine peer communication. A queued prompt can become stale; check the latest inbox before acting. turn-list and turn-status inspect completion; turn-cancel! cancels.")
+          (sessions . "(session-list #:status 'active #:fields '(id cwd request)) returns sessions and warnings. Optional #:provider selects claude, codex or process. (session-ref ID #:fields '(status request reply association)) returns session and warnings. (session-changes [CURSOR] #:fields '(id status request)) returns changed, removed, cursor and warnings; reuse the same options, omit an expired cursor for a fresh baseline. Cursors retain 32 snapshots per workspace and expire on restart. Metadata-only fields skip transcripts; transcript reads are incremental and bounded. Status is native metadata, excerpts are not task summaries; association is turn, sequence, pending, unpaired or unknown. Failed providers never imply removals. These trusted read-only functions never start turns. Process identities are unresolved and may overlap native threads. agent-list separately lists Weft registrations.")
+          (agents . "agent-list discovers registered names. Use session-list for native sessions outside Weft. agent-register! takes a name, codex/claude provider and optional cwd. agent-send! starts or queues a FUTURE turn, not an in-turn message: use message-post! for routine peer communication. A queued prompt can become stale; check the latest inbox before acting. turn-list and turn-status inspect completion; turn-cancel! cancels.")
           (events . "event-on! registers a named topic/command hook; event-emit! queues payloads; event-hooks and event-off! inspect and remove hooks. Commands resolve when invoked.")
           (owner . "owner-post! adds an attributed inbox message; owner-messages reads it. owner-notify! configures a delivery callback. Callback success does not prove visible delivery.")
           (commands . "command-register!, command-list, command-remove! and command-invoke expose live commands. orchestration-state summarizes queues. Save the procedure expression explicitly for restart recovery.")
@@ -285,7 +287,9 @@
               (set-workspace-effects! workspace
                 (append (workspace-effects workspace) (list (list type (copy-data payload)))))
               (length (workspace-effects workspace)))))
-        (install-orchestration-bindings! orchestration))
+        (begin
+          (install-session-bindings! module)
+          (install-orchestration-bindings! orchestration)))
     (set-module-public-interface! module module)
     (catch #t
       (lambda ()

@@ -8,7 +8,7 @@
 
 (define %tool
   '((name . "evaluate")
-    (description . "Trusted shared Scheme workspace with local-user authority, no sandbox. For peer collaboration prefer weft-room; its data is separate from this endpoint. (workspace-help 'collaboration) explains message-post!/message-inbox and shared data. (agent-list) discovers Weft-owned agents; agent-send! queues a FUTURE turn, not a live message. Client-native SendMessage does not address these names. Use (workspace-help 'agents) or (workspace-state) for details.")
+    (description . "Trusted shared Scheme workspace with local-user authority, no sandbox. (session-list) reports native Claude/Codex session activity; (session-ref ID) reads recent excerpts. For peer collaboration prefer weft-room; its data is separate from this endpoint. (workspace-help 'collaboration) explains message-post!/message-inbox and shared data. (agent-list) discovers Weft-owned agents; agent-send! queues a FUTURE turn, not a live message. Client-native SendMessage does not address these names. Use (workspace-help 'agents) or (workspace-state) for details.")
     (inputSchema (type . "object")
                  (properties (code (type . "string")
                                    (maxLength . 131072))
@@ -119,7 +119,7 @@
         (result id
                 `((protocolVersion . "2025-11-25")
                   (capabilities (tools (listChanged . #f)))
-                  (serverInfo (name . "weft") (version . "0.6.1"))
+                  (serverInfo (name . "weft") (version . "0.7.0"))
                   (instructions . ,description))))
        ((equal? method "ping") (result id '()))
        ((not initialized?) (rpc-error id -32002 "Initialize first"))
