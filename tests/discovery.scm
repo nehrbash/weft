@@ -188,6 +188,11 @@
 (define workspace (make-workspace))
 (test-equal "trusted workspace installs all API procedures" "(#t #t #t)"
   (assq-ref (workspace-evaluate workspace "(map procedure? (list session-list session-ref session-changes))") 'value))
+(test-equal "workspace binding accepts positional cursor before keywords" 'ok
+  (assq-ref (workspace-evaluate workspace
+    "(define baseline (session-changes #:provider 'process #:fields '(id))) (session-changes (assq-ref baseline 'cursor) #:provider 'process #:fields '(id))") 'status))
+(test-equal "workspace binding accepts positional session ID" 'ok
+  (assq-ref (workspace-evaluate workspace "(session-ref \"process:999999999\" #:fields '(id))") 'status))
 (workspace-close workspace)
 (define isolated (make-workspace #:isolated? #t))
 (test-equal "isolated workspace cannot inspect host" 'error

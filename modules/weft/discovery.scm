@@ -260,5 +260,5 @@
   (let ((inspector (make-session-inspector)))
     (for-each (lambda (binding)
       (module-define! module (car binding)
-        (lambda args (apply (cdr binding) #:inspector inspector args))))
+        (lambda args (apply (cdr binding) (append args (list #:inspector inspector))))))
       `((session-list . ,session-list) (session-ref . ,session-ref) (session-changes . ,session-changes)))))
