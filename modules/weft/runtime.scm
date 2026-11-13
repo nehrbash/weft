@@ -65,7 +65,7 @@
   (append
     '((evaluate . "Definitions survive calls. Exceptions preserve earlier effects; there is no rollback. Use workspace-state to detect a generation change.")
       (saved . "(saved-set! 'name value) persists data; (saved-ref 'name) reads it, returning #f when absent or an optional fallback argument. saved-define! takes a name and quoted expression; saved-list inspects definitions; saved-remove! stops restoring one. Recovery evaluates saved expressions: keep them free of external effects. %weft-messages is reserved for the shared inbox.")
-      (zones . "(zone-set! 'name 'text value) publishes a zone; (zone-ref 'name) reads its data, returning #f when absent or an optional fallback argument. Types: text/table/metric/wiring. zone-list lists zones; zone-remove! removes one. Owner layout is controlled in the Emacs console.")
+      (zones . "(zone-set! 'name TYPE DATA) publishes a zone. Examples: (zone-set! 'status 'text \"Ready\"), (zone-set! 'passed 'metric 5), (zone-set! 'checks 'table '((case result) (one pass))), (zone-set! 'flow 'wiring '((build test))). Metric accepts one number or string, not an alist; use a table for multiple counts. (zone-ref 'name) reads data, returning #f when absent or an optional fallback. zone-list lists zones; zone-remove! removes one.")
       (collaboration . "Use the same endpoint: weft-room and trusted weft have separate state. (message-post! 'alice 'bob \"review ready\") adds a peer message without starting a turn or requiring approval. (message-inbox 'bob 0) returns (id sender text) entries after cursor 0. Evaluation is serialized: read once and return; wait OUTSIDE evaluate so peers can write. Never sleep or poll in a Scheme loop. Retains the latest 128 messages across recipients, 4096 characters each. Sender names are cooperative labels, not authenticated identities. This does not wake an idle agent. Use saved-set!/saved-ref for shared structured data and zone-set!/zone-ref for visible results.")
       (advice . "advice-add! takes a name, target, before/after/around kind, and procedure symbol. Targets include workspace-evaluate, workspace-tick and command-invoke targets. Around advice receives a zero-argument next procedure followed by the arguments. Use advice-list and advice-remove! to inspect or remove it.")
       (limits . "Results are bounded. Evaluation accepts a deadline up to 50 seconds. Retain large values and retrieve summaries."))
@@ -136,7 +136,7 @@
                        ((wiring) (and (list? value)
                                      (every (lambda (edge) (and (list? edge) (= 2 (length edge)))) value))))
                      (data? value))
-          (error "Expected a typed text, table, metric or wiring zone"))
+          (error "zone-set! expects NAME TYPE DATA: text=string, metric=one number/string, table=list of rows, wiring=list of two-item edges"))
         (when (and (not (assq name (workspace-zones workspace)))
                    (>= (length (workspace-zones workspace)) 64))
           (error "Zone limit reached"))
@@ -202,6 +202,7 @@
     (install-bindings! workspace)
     (if isolated?
         (begin
+          (module-define! module 'format format)
           (for-each (lambda (name) (module-remove! module name))
                     '(job-start job-list job-status job-wait job-cancel job-forget))
           (for-each

@@ -35,6 +35,13 @@
   (lambda ()
     (test-equal "isolated evaluation" 42 (value "(+ 20 22)"))
     (test-equal "shared live definitions" 9 (begin (evaluate "(define x 9)") (value "x")))
+    (test-equal "room formatting avoids string assembly boilerplate" "5/5"
+      (value "(format #f \"~a/~a\" 5 5)"))
+    (test-equal "room formatting output stays captured" "5/5"
+      (assq-ref (evaluate "(format #t \"~a/~a\" 5 5)") 'output))
+    (test-assert "invalid metric explains its shape"
+      (string-contains (assq-ref (evaluate "(zone-set! 'counts 'metric '((passed . 5)))") 'value)
+                       "metric=one number/string"))
     (for-each
       (lambda (code)
         (let ((reply (remote-evaluate socket-path code #:seconds 0.2)))
