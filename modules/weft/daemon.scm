@@ -142,7 +142,7 @@
         (lambda () (close-port probe))))))
 
 (define* (serve-workspace path #:key (initialize (lambda (module) #t)) state-file isolated?
-                          evaluator (finalize (lambda () #t)))
+                          external-persistence? evaluator (finalize (lambda () #t)))
   "Serve one persistent workspace over a private GNU/Linux Unix socket."
   (prepare-directory! path)
   (let ((lock (fdopen (open-fdes (string-append path ".lock")
@@ -158,7 +158,8 @@
         (remove-stale-socket! path)
         (set! workspace (or evaluator
                            (make-workspace #:initialize initialize #:state-file state-file
-                                           #:isolated? isolated?)))
+                                           #:isolated? isolated?
+                                           #:external-persistence? external-persistence?)))
         (set! listener (socket AF_UNIX SOCK_STREAM 0))
         (nonblocking! listener)
         (bind listener AF_UNIX path)

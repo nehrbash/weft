@@ -32,6 +32,12 @@ tools do not address Weft agent names.
 
 `saved-ref` and `zone-ref` return `#f` when absent, or an optional fallback.
 
+For a decision based on an earlier read, use `(saved-cas! 'stock 20 8)`:
+it replaces an existing saved value only if it still equals `20`, returning
+`#t` on success or `#f` on conflict. Re-read before retrying. A read/check/write
+inside one evaluation also prevents interleaving, but neither is a transaction
+with rollback. Store related fields in one value when they must recover together.
+
 Read the inbox once per evaluation and return. Evaluations are serialized:
 sleeping or polling inside Scheme prevents peers from publishing the result
 being awaited. Wait outside `evaluate`; the isolated room rejects `sleep` and

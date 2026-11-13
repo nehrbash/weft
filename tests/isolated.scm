@@ -34,6 +34,13 @@
   start!
   (lambda ()
     (test-equal "isolated evaluation" 42 (value "(+ 20 22)"))
+    (test-equal "broker-managed workspace advertises durable recovery" 'snapshot
+      (value "(assq-ref (workspace-state) 'persistence)"))
+    (value "(saved-set! 'stock 20)")
+    (test-equal "separate clients cannot commit the same stale observation" '(#t #f 10)
+      (list (value "(saved-cas! 'stock 20 10)")
+            (value "(saved-cas! 'stock 20 8)")
+            (value "(saved-ref 'stock)")))
     (test-equal "shared live definitions" 9 (begin (evaluate "(define x 9)") (value "x")))
     (test-equal "room formatting avoids string assembly boilerplate" "5/5"
       (value "(format #f \"~a/~a\" 5 5)"))
@@ -80,6 +87,7 @@
     (evaluate "(effect-propose! 'notify \"pending across restart\")")
     (stop!) (start!)
     (test-equal "isolated state survives restart" 17 (value "durable"))
+    (test-equal "conditional update survives broker restart" 10 (value "(saved-ref 'stock)"))
     (test-equal "room inbox survives restart" '((1 claude "API ready"))
       (value "(message-inbox 'codex)"))
     (test-equal "room reply keeps message cursor" 2

@@ -33,7 +33,7 @@
                   "--setenv" "GUILE_LOAD_COMPILED_PATH"
                   (string-join (store-paths %load-compiled-path) ":")
                   guile "--no-auto-compile" "-c"
-                  "(use-modules (weft daemon)) (setrlimit 'as 1073741824 1073741824) (setrlimit 'core 0 0) (serve-workspace \"/run/weft/worker.sock\" #:isolated? #t)"))))
+                  "(use-modules (weft daemon)) (setrlimit 'as 1073741824 1073741824) (setrlimit 'core 0 0) (serve-workspace \"/run/weft/worker.sock\" #:isolated? #t #:external-persistence? #t)"))))
 
 (define (valid-payload? type payload)
   (define (strings? value)

@@ -14,7 +14,7 @@
             workspace-close workspace-tick! make-room room-evaluate room-help room-state))
 
 (define-record-type <workspace>
-  (%make-workspace module generation jobs orchestration path saved advice zones snapshot isolated effects)
+  (%make-workspace module generation jobs orchestration path saved advice zones snapshot isolated effects external-persistence)
   workspace?
   (module workspace-module)
   (generation workspace-generation)
@@ -26,7 +26,8 @@
   (zones workspace-zones set-workspace-zones!)
   (snapshot workspace-snapshot set-workspace-snapshot!)
   (isolated workspace-isolated?)
-  (effects workspace-effects set-workspace-effects!))
+  (effects workspace-effects set-workspace-effects!)
+  (external-persistence workspace-external-persistence?))
 
 (define (checkpoint! workspace)
   (when (workspace-path workspace)
@@ -57,7 +58,8 @@
 (define (workspace-state workspace)
   "Return workspace identity and persistence boundaries."
   `((generation . ,(workspace-generation workspace))
-    (persistence . ,(if (workspace-path workspace) 'snapshot 'process))
+    (persistence . ,(if (or (workspace-path workspace) (workspace-external-persistence? workspace))
+                       'snapshot 'process))
     (authority . ,(if (workspace-isolated? workspace) 'isolated 'local-user))
     (sandbox . ,(workspace-isolated? workspace))))
 
@@ -65,7 +67,7 @@
   "Describe this workspace's available operations and authority."
   (append
     '((evaluate . "Definitions survive calls. Exceptions preserve earlier effects; there is no rollback. Use workspace-state to detect a generation change.")
-      (saved . "(saved-set! 'name value) persists data; (saved-ref 'name) reads it, returning #f when absent or an optional fallback argument. saved-define! takes a name and quoted expression; saved-list inspects definitions; saved-remove! stops restoring one. Recovery evaluates saved expressions: keep them free of external effects. %weft-messages is reserved for the shared inbox.")
+      (saved . "(saved-set! 'name value) persists data; (saved-ref 'name) reads it, returning #f when absent or an optional fallback argument. (saved-cas! 'name expected replacement) atomically updates an existing saved value only if equal? to expected, returning #t or #f on conflict; re-read on conflict. saved-define! takes a name and quoted expression; saved-list inspects definitions; saved-remove! stops restoring one. Recovery evaluates saved expressions: keep them free of external effects. %weft-messages is reserved for the shared inbox.")
       (zones . "(zone-set! 'name TYPE DATA) publishes a zone. Examples: (zone-set! 'status 'text \"Ready\"), (zone-set! 'passed 'metric 5), (zone-set! 'checks 'table '((case result) (one pass))), (zone-set! 'flow 'wiring '((build test))). Metric accepts one number or string, not an alist; use a table for multiple counts. (zone-ref 'name) reads data, returning #f when absent or an optional fallback. zone-list lists zones; zone-remove! removes one.")
       (collaboration . "Use the same endpoint: weft-room and trusted weft have separate state. (message-post! 'alice 'bob \"review ready\") adds a peer message without starting a turn or requiring approval. (message-inbox 'bob 0) returns (id sender text) entries after cursor 0. Evaluation is serialized: read once and return; wait OUTSIDE evaluate so peers can write. Never sleep or poll in a Scheme loop. Retains the latest 128 messages across recipients, 4096 characters each. Sender names are cooperative labels, not authenticated identities. This does not wake an idle agent. Use saved-set!/saved-ref for shared structured data and zone-set!/zone-ref for visible results.")
       (advice . "advice-add! takes a name, target, before/after/around kind, and procedure symbol. Targets include workspace-evaluate, workspace-tick and command-invoke targets. Around advice receives a zero-argument next procedure followed by the arguments. Use advice-list and advice-remove! to inspect or remove it.")
@@ -92,7 +94,8 @@
     (bind 'workspace-help
       (lambda* (#:optional topic)
         (let ((help (workspace-help workspace)))
-          (if topic (or (assq-ref help topic) (error "Unknown help topic" topic)) help))))
+          (if topic (or (assq-ref help topic)
+                        (error "Unknown help topic; choose one of" (map car help))) help))))
     (bind 'room-state (module-ref module 'workspace-state))
     (bind 'room-help (module-ref module 'workspace-help))
     (install-advice-bindings! (workspace-advice workspace) module)
@@ -124,6 +127,13 @@
       (lambda* (name #:optional (fallback #f))
         (if (assq name (workspace-saved workspace))
             (copy-data (module-ref module name)) fallback)))
+    (bind 'saved-cas!
+      (lambda (name expected replacement)
+        (unless (and (symbol? name) (assq name (workspace-saved workspace))
+                     (data? expected) (data? replacement))
+          (error "Expected an existing saved name and readable comparison/replacement values"))
+        (and (equal? (module-ref module name) expected)
+             (begin ((module-ref module 'saved-set!) name replacement) #t))))
     (bind 'saved-remove!
       (lambda (name)
         (set-workspace-saved! workspace (alist-delete name (workspace-saved workspace)))
@@ -238,7 +248,8 @@
     (bind 'job-cancel (lambda (id) (job-cancel manager id)))
     (bind 'job-forget (lambda (id) (job-forget manager id)))))
 
-(define* (make-workspace #:key (initialize (lambda (module) #t)) state-file isolated?)
+(define* (make-workspace #:key (initialize (lambda (module) #t)) state-file isolated?
+                          external-persistence?)
   "Create a trusted, process-local Scheme workspace."
   (let* ((name (list 'workspace (gensym "session-")))
          (module (if isolated? (make-sandbox-module all-pure-and-impure-bindings)
@@ -247,7 +258,8 @@
          (manager (make-job-manager))
          (orchestration (make-orchestration manager module))
          (workspace (%make-workspace module generation manager orchestration
-                                     state-file '() (make-advice) '() #f isolated? '())))
+                                     state-file '() (make-advice) '() #f isolated? '()
+                                     external-persistence?)))
     (if isolated?
         (begin (set-module-name! module name) (module-define-submodule! (resolve-module '(workspace))
                                                                      (cadr name) module))

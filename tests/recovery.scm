@@ -25,6 +25,17 @@
 (test-equal "updating bindings preserves recovery order" 3 (value "b"))
 (test-equal "zones survive restart" '((result metric 42)) (value "(zone-list)"))
 (test-equal "direct saved lookup" 21 (value "(saved-ref 'count)"))
+(value "(saved-set! 'stock 20)")
+(test-equal "compare-and-set accepts the current observation" #t
+  (value "(saved-cas! 'stock 20 10)"))
+(test-equal "compare-and-set rejects a stale observation" #f
+  (value "(saved-cas! 'stock 20 8)"))
+(test-equal "stale writer cannot overwrite committed stock" 10
+  (value "(saved-ref 'stock)"))
+(test-equal "compare-and-set requires an existing value" 'error
+  (assq-ref (evaluate "(saved-cas! 'missing #f 1)") 'status))
+(test-assert "unknown help topic lists valid topics"
+  (string-contains (assq-ref (evaluate "(workspace-help 'data)") 'value) "collaboration"))
 (test-equal "direct zone lookup" 42 (value "(zone-ref 'result)"))
 (test-equal "missing data can be polled without exception plumbing" '(#f waiting #f waiting)
   (value "(list (saved-ref 'missing) (saved-ref 'missing 'waiting) (zone-ref 'missing) (zone-ref 'missing 'waiting))"))
