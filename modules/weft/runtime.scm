@@ -64,8 +64,9 @@
   "Describe this workspace's available operations and authority."
   (append
     '((evaluate . "Definitions survive calls. Exceptions preserve earlier effects; there is no rollback. Use workspace-state to detect a generation change.")
-      (saved . "saved-define! takes a name and quoted expression; saved-set! saves readable data. saved-list inspects definitions; saved-remove! stops restoring one. Only explicitly saved definitions and values survive restart. Definition expressions are evaluated during recovery; keep them free of external effects.")
-      (zones . "zone-set! accepts a name, text/table/metric/wiring type and readable data. zone-list inspects rendered data; zone-remove! removes a zone. Owner layout is controlled in the Emacs console.")
+      (saved . "(saved-set! 'name value) persists data; (saved-ref 'name) reads it. saved-define! takes a name and quoted expression; saved-list inspects definitions; saved-remove! stops restoring one. Recovery evaluates saved expressions: keep them free of external effects. %weft-messages is reserved for the shared inbox.")
+      (zones . "(zone-set! 'name 'text value) publishes a zone; (zone-ref 'name) reads its data. Types: text/table/metric/wiring. zone-list lists zones; zone-remove! removes one. Owner layout is controlled in the Emacs console.")
+      (collaboration . "Use the same endpoint: weft-room and trusted weft have separate state. (message-post! 'alice 'bob \"review ready\") adds a peer message without starting a turn or requiring approval. (message-inbox 'bob 0) returns (id sender text) entries after cursor 0; poll between work steps. Retains the latest 128 messages across recipients, 4096 characters each. Sender names are cooperative labels, not authenticated identities. This does not wake an idle agent. Use saved-set!/saved-ref for shared structured data and zone-set!/zone-ref for visible results.")
       (advice . "advice-add! takes a name, target, before/after/around kind, and procedure symbol. Targets include workspace-evaluate, workspace-tick and command-invoke targets. Around advice receives a zero-argument next procedure followed by the arguments. Use advice-list and advice-remove! to inspect or remove it.")
       (limits . "Results are bounded. Evaluation accepts a deadline up to 50 seconds. Retain large values and retrieve summaries."))
     (if (workspace-isolated? workspace)
@@ -74,7 +75,7 @@
           (recovery . "The room broker saves explicit definitions, values and zones. Ordinary definitions last until worker restart. Approvals are single-use; interrupted effects are never automatically replayed."))
         '((authority . "Trusted local-user REPL. It is not protected by the isolated room's approval gate.")
           (jobs . "job-start takes argv with optional cwd, stdin and output-limit. job-status/job-list inspect; job-wait waits up to 10 seconds; job-cancel stops; job-forget removes completed jobs.")
-          (agents . "agent-register! takes a name, codex/claude provider and optional cwd. agent-send! queues a prompt; turn-list and turn-status inspect completion; turn-cancel! cancels.")
+          (agents . "agent-list discovers registered names. agent-register! takes a name, codex/claude provider and optional cwd. agent-send! starts or queues a FUTURE turn, not an in-turn message: use message-post! for routine peer communication. A queued prompt can become stale; check the latest inbox before acting. turn-list and turn-status inspect completion; turn-cancel! cancels.")
           (events . "event-on! registers a named topic/command hook; event-emit! queues payloads; event-hooks and event-off! inspect and remove hooks. Commands resolve when invoked.")
           (owner . "owner-post! adds an attributed inbox message; owner-messages reads it. owner-notify! configures a delivery callback. Callback success does not prove visible delivery.")
           (commands . "command-register!, command-list, command-remove! and command-invoke expose live commands. orchestration-state summarizes queues. Save the procedure expression explicitly for restart recovery.")
@@ -86,7 +87,10 @@
     (define (bind name procedure)
       (module-define! module name procedure))
     (bind 'workspace-state (lambda () (workspace-state workspace)))
-    (bind 'workspace-help (lambda () (workspace-help workspace)))
+    (bind 'workspace-help
+      (lambda* (#:optional topic)
+        (let ((help (workspace-help workspace)))
+          (if topic (or (assq-ref help topic) (error "Unknown help topic" topic)) help))))
     (bind 'room-state (module-ref module 'workspace-state))
     (bind 'room-help (module-ref module 'workspace-help))
     (install-advice-bindings! (workspace-advice workspace) module)
@@ -114,6 +118,10 @@
       (lambda (name value)
         ((module-ref module 'saved-define!) name (list 'quote (copy-data value)))))
     (bind 'saved-list (lambda () (copy-data (workspace-saved workspace))))
+    (bind 'saved-ref
+      (lambda (name)
+        (unless (assq name (workspace-saved workspace)) (error "Unknown saved value" name))
+        (copy-data (module-ref module name))))
     (bind 'saved-remove!
       (lambda (name)
         (set-workspace-saved! workspace (alist-delete name (workspace-saved workspace)))
@@ -136,10 +144,38 @@
           (acons name (list type (copy-data value)) (alist-delete name (workspace-zones workspace))))
         (checkpoint! workspace) name))
     (bind 'zone-list (lambda () (copy-data (workspace-zones workspace))))
+    (bind 'zone-ref
+      (lambda (name)
+        (let ((zone (assq-ref (workspace-zones workspace) name)))
+          (unless zone (error "Unknown zone" name))
+          (copy-data (cadr zone)))))
     (bind 'zone-remove!
       (lambda (name)
         (set-workspace-zones! workspace (alist-delete name (workspace-zones workspace)))
         (checkpoint! workspace) #t))
+    (define (messages)
+      (if (assq '%weft-messages (workspace-saved workspace))
+          ((module-ref module 'saved-ref) '%weft-messages) '()))
+    (bind 'message-post!
+      (lambda (from to text)
+        (unless (and (symbol? from) (symbol? to) (string? text)
+                     (<= 1 (string-length text) 4096))
+          (error "Expected sender, recipient symbols and 1..4096 characters"))
+        (let* ((old (messages))
+               (id (if (null? old) 1 (+ 1 (caar old))))
+               (entries (cons (list id from to text) old)))
+          ((module-ref module 'saved-set!) '%weft-messages
+            (take entries (min 128 (length entries))))
+          id)))
+    (bind 'message-inbox
+      (lambda* (recipient #:optional (after 0))
+        (unless (and (symbol? recipient) (integer? after) (>= after 0))
+          (error "Expected recipient symbol and nonnegative message cursor"))
+        (filter-map
+          (lambda (entry)
+            (and (> (car entry) after) (eq? recipient (caddr entry))
+                 (list (car entry) (cadr entry) (cadddr entry))))
+          (reverse (messages)))))
     (bind 'job-start
       (lambda* (argv #:key cwd (stdin "") (output-limit 16384))
         (job-start manager argv #:cwd cwd #:stdin stdin #:output-limit output-limit)))

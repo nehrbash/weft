@@ -8,6 +8,36 @@ Define or redefine functions in later calls, or load an extension with
 `(primitive-load "/absolute/path/extension.scm")`. Existing values remain
 available. `workspace-help`, `workspace-state` and `procedure-documentation`
 provide discovery; `room-help` and `room-state` remain compatibility aliases.
+Pass a topic, such as `(workspace-help 'collaboration)`, for focused help.
+MCP replies default to compact text with status, generation and the unescaped
+Scheme result. Set the tool argument `format` to `record` for the full response
+alist. CLI and Scheme embedding responses retain their record format.
+
+## Collaborating across providers
+
+All teammates should use `weft-room` for shared data and peer messages. Its
+state is separate from the trusted `weft` endpoint. Client-native messaging
+tools do not address Weft agent names.
+
+```scheme
+(message-post! 'claude 'codex "API ready; please review")
+(message-inbox 'codex)       ; => ((1 claude "API ready; please review"))
+(message-inbox 'codex 1)     ; => messages after ID 1
+(saved-set! 'api '(add update summary))
+(saved-ref 'api)
+(zone-set! 'progress 'text "Reviewing")
+(zone-ref 'progress)
+```
+
+Poll the inbox between work steps. Messages are shared room data: they do not
+start a turn, notify the owner, require approval, or wake an idle agent. Sender
+and recipient symbols are cooperative labels, not authenticated identities.
+The latest 128 messages across recipients survive restart; each is limited to
+4096 characters. `%weft-messages` is reserved saved data for the inbox.
+
+Use `agent-send!` on the trusted endpoint when another **turn** is needed.
+It queues behind running work; a prompt can become stale before delivery.
+Check the latest inbox and shared state before acting on a queued request.
 
 ## Run
 

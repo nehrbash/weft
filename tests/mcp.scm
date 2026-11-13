@@ -32,7 +32,7 @@
       (error "Response ID mismatch" reply)) reply))
 (define (evaluate code . timeout)
   (let* ((reply (request "tools/call"
-                         `((name . "evaluate") (arguments (code unquote code)
+                         `((name . "evaluate") (arguments (code unquote code) (format . "record")
                                                           ,@(if (pair? timeout)
                                                                 `((seconds
                                                                    unquote
@@ -56,6 +56,19 @@
             (vector-length (assoc-ref (assoc-ref (request "tools/list"
                                                           '()) "result")
                                       "tools")))
+(define compact-code "'((alice \"Review ready\") (bob \"Tests pass\"))")
+(define compact-reply
+  (assoc-ref (vector-ref (assoc-ref (assoc-ref
+    (request "tools/call" `((name . "evaluate") (arguments (code . ,compact-code))))
+    "result") "content") 0) "text"))
+(test-assert "compact output avoids nested Scheme string escaping"
+  (string-contains compact-reply "((alice \"Review ready\") (bob \"Tests pass\"))"))
+(test-assert "compact output is smaller than response record"
+  (< (string-length compact-reply) (string-length (object->string (evaluate compact-code)))))
+(test-equal "unknown output format rejected" -32602
+  (assoc-ref (assoc-ref
+    (request "tools/call" '((name . "evaluate") (arguments (code . "42") (format . "unknown"))))
+    "error") "code"))
 (define initial
   (evaluate "(define answer 40) answer"))
 (test-equal "definition result" "40"
@@ -209,7 +222,7 @@
             (string-append
              (scm->json-string '((jsonrpc . "2.0") (id . 1) (method . "initialize"))) "\n"
              (scm->json-string `((jsonrpc . "2.0") (id . 2) (method . "tools/call")
-                                (params (name . "evaluate") (arguments (code . ,code))))) "\n"))
+                                (params (name . "evaluate") (arguments (code . ,code) (format . "record"))))) "\n"))
            (output (open-output-string)))
       (serve-mcp (open-input-string requests) output
                  #:evaluate (lambda (source seconds)

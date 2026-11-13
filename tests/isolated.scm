@@ -58,9 +58,17 @@
     (value "(saved-set! 'durable 17)")
     (value "(zone-set! 'status 'text \"ready\")")
     (value "(zone-set! 'count 'metric 17)")
+    (test-equal "room messages need no effect approval" "()"
+      (assq-ref (evaluate "(message-post! 'claude 'codex \"API ready\")") 'proposals))
+    (test-equal "room direct data lookup" 17 (value "(saved-ref 'durable)"))
+    (test-equal "room direct zone lookup" "ready" (value "(zone-ref 'status)"))
     (evaluate "(effect-propose! 'notify \"pending across restart\")")
     (stop!) (start!)
     (test-equal "isolated state survives restart" 17 (value "durable"))
+    (test-equal "room inbox survives restart" '((1 claude "API ready"))
+      (value "(message-inbox 'codex)"))
+    (test-equal "room reply keeps message cursor" 2
+      (value "(message-post! 'codex 'claude \"Tests ready\")"))
     (test-equal "isolated zones preserve order across restart" '((count metric 17) (status text "ready")) (value "(zone-list)"))
     (test-equal "pending request survives restart" 'ok
       (assq-ref (owner 'decide 2 '(notify "pending across restart") 'reject) 'status))

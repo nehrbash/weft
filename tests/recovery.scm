@@ -14,6 +14,9 @@
 (value "(saved-define! 'b '(+ a 1))")
 (value "(saved-set! 'a 2)")
 (value "(zone-set! 'result 'metric 42)")
+(value "(message-post! 'alice 'bob \"Review ready\")")
+(value "(message-post! 'bob 'alice \"Please add boundary tests\")")
+(test-equal "messages do not create agent turns" '() (value "(turn-list)"))
 (value "(owner-post! \"keep this\" #:from 'fixture)")
 (value "(agent-register! 'fixture 'codex) (agent-send! 'fixture \"must not replay\")")
 (workspace-close workspace)
@@ -21,6 +24,24 @@
 (test-equal "definitions and values survive restart" 42 (value "(double count)"))
 (test-equal "updating bindings preserves recovery order" 3 (value "b"))
 (test-equal "zones survive restart" '((result metric 42)) (value "(zone-list)"))
+(test-equal "direct saved lookup" 21 (value "(saved-ref 'count)"))
+(test-equal "direct zone lookup" 42 (value "(zone-ref 'result)"))
+(test-equal "peer inbox survives restart" '((1 alice "Review ready"))
+  (value "(message-inbox 'bob)"))
+(test-equal "peer reply filters recipient" '((2 bob "Please add boundary tests"))
+  (value "(message-inbox 'alice)"))
+(test-equal "peer cursor excludes consumed messages" '()
+  (value "(message-inbox 'bob 1)"))
+(test-equal "message IDs continue after restart" 3
+  (value "(message-post! 'alice 'bob \"Updated\")"))
+(test-assert "topic-specific help is bounded"
+  (< (string-length (value "(workspace-help 'collaboration)")) 1000))
+(test-equal "oversized peer message rejected" 'error
+  (assq-ref (evaluate "(message-post! 'alice 'bob (make-string 4097 #\\x))") 'status))
+(evaluate "(do ((i 0 (+ i 1))) ((= i 130)) (message-post! 'alice 'bob \"bounded\"))")
+(test-equal "peer history is bounded" 128 (value "(length (message-inbox 'bob))"))
+(test-equal "peer result mutation does not alter inbox" "bounded"
+  (value "(let ((inbox (message-inbox 'bob))) (string-set! (caddar inbox) 0 #\\X) (caddar (message-inbox 'bob)))"))
 (test-assert "generation changes" (not (equal? generation (assq-ref (workspace-state workspace) 'generation))))
 (test-equal "queued turn becomes interrupted" 'interrupted
   (value "(assq-ref (car (turn-list)) 'state)"))

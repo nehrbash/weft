@@ -7,13 +7,17 @@
 
 (define %tool
   '((name . "evaluate")
-    (description . "Evaluate Guile Scheme in a persistent local workspace. Start with (workspace-help) and (workspace-state). Definitions, jobs and agent orchestration belong to the workspace host. This trusted REPL runs with the local user's authority; no sandbox or approval gate.")
+    (description . "Trusted shared Scheme workspace with local-user authority, no sandbox. For peer collaboration prefer weft-room; its data is separate from this endpoint. (workspace-help 'collaboration) explains message-post!/message-inbox and shared data. (agent-list) discovers Weft-owned agents; agent-send! queues a FUTURE turn, not a live message. Client-native SendMessage does not address these names. Use (workspace-help 'agents) or (workspace-state) for details.")
     (inputSchema (type . "object")
                  (properties (code (type . "string")
                                    (maxLength . 131072))
                              (seconds (type . "number")
                                       (exclusiveMinimum . 0)
-                                      (maximum . 50)))
+                                      (maximum . 50))
+                             (format (type . "string")
+                                     (enum . #("compact" "record"))
+                                     (default . "compact")
+                                     (description . "Compact human-readable output, or the full Scheme response record.")))
                  (required . #("code"))
                  (additionalProperties . #f))
     (annotations (readOnlyHint . #f)
@@ -30,6 +34,20 @@
   `((jsonrpc . "2.0") (id . ,id)
     (error (code . ,code) (message . ,message))))
 
+(define (evaluation-text evaluation style)
+  (if (equal? style "record")
+      (object->string evaluation)
+      (string-append
+        (format #f "~a | ~a\n~a" (assq-ref evaluation 'status)
+                (assq-ref evaluation 'generation) (assq-ref evaluation 'value))
+        (let ((output (assq-ref evaluation 'output)))
+          (if (or (not output) (string-null? output)) ""
+              (string-append "\nstdout:\n" output)))
+        (let ((proposals (assq-ref evaluation 'proposals)))
+          (if (or (not proposals) (equal? proposals "()")) ""
+              (string-append "\nproposals: " proposals)))
+        (if (assq-ref evaluation 'truncated) "\n[truncated]" ""))))
+
 (define* (serve-mcp input output #:key (initialize (lambda (module) #t))
                     (evaluate #f) isolated?)
   "Serve MCP using an owned workspace or an externally owned EVALUATE callback."
@@ -39,7 +57,7 @@
   (define initialized? #f)
   (define description
     (if isolated?
-        "Evaluate restricted Scheme in a shared Bubblewrap-isolated room. Use workspace-help and workspace-state. saved-define!/saved-set! persist explicit definitions and values; zone-set! publishes typed zones. effect-propose! requests notify/write-file/run/session-send effects for exact-content owner approval; agents cannot approve through this evaluator."
+        "Shared room for cross-provider collaboration, isolated with Bubblewrap. All teammates should use this endpoint; trusted weft has separate state. Start with (workspace-help 'collaboration). (message-post! 'alice 'bob \"text\") and (message-inbox 'bob) exchange messages; poll between work steps, no automatic wakeup. (saved-set! 'name data)/(saved-ref 'name) share data; zone-set!/zone-ref publish visible results. Names are cooperative labels, not authenticated identities. External effects require effect-propose! and exact-content owner approval. Use (workspace-help 'effects) for details."
         (assq-ref %tool 'description)))
   (define (result id value)
     `((jsonrpc . "2.0") (id . ,id) (result . ,value)))
@@ -62,7 +80,7 @@
         (result id
                 `((protocolVersion . "2025-11-25")
                   (capabilities (tools (listChanged . #f)))
-                  (serverInfo (name . "weft") (version . "0.4.1"))
+                  (serverInfo (name . "weft") (version . "0.5.0"))
                   (instructions . ,description))))
        ((equal? method "ping") (result id '()))
        ((not initialized?) (rpc-error id -32002 "Initialize first"))
@@ -71,14 +89,17 @@
        ((equal? method "tools/call")
         (let* ((arguments (assoc-ref params "arguments"))
                (code (and (object? arguments) (assoc-ref arguments "code")))
+               (style (if (and (object? arguments) (assoc "format" arguments))
+                          (assoc-ref arguments "format") "compact"))
                (seconds (if (and (object? arguments) (assoc "seconds" arguments))
                             (assoc-ref arguments "seconds") 30)))
           (if (and (equal? (assoc-ref params "name") "evaluate")
                    (object? arguments) (string? code)
                    (<= (string-length code) 131072)
                    (real? seconds) (> seconds 0) (<= seconds 50)
+                   (member style '("compact" "record"))
                    (every (lambda (entry)
-                            (member (car entry) '("code" "seconds"))) arguments))
+                            (member (car entry) '("code" "seconds" "format"))) arguments))
               (let ((evaluation
                      (catch #t
                        (lambda () (run code seconds))
@@ -89,7 +110,7 @@
                              (output . "") (truncated . ,(> (string-length message) 4096))))))))
                 (result id
                         `((content . ,(vector `((type . "text")
-                                                (text . ,(object->string evaluation)))))
+                                                (text . ,(evaluation-text evaluation style)))))
                           (isError . ,(not (eq? 'ok (assq-ref evaluation 'status)))))))
               (rpc-error id -32602 "Expected evaluate with code and optional seconds"))))
        (else (rpc-error id -32601 "Unknown method")))))
