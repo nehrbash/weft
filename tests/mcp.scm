@@ -134,6 +134,30 @@
                                                                             (code . "1")
                                                                             (seconds . 51))))
                                   "error") "code"))
+(evaluate "(tool-define! 'greet \"Greet someone.\" (lambda* (who #:optional (times 1)) (string-join (make-list times who) \" \")) #:properties '((who (type . \"string\")) (times (type . \"integer\"))) #:required '(who))")
+(define (tool-call-reply arguments)
+  (assoc-ref (request "tools/call" `((name . "greet") (arguments ,@arguments))) "result"))
+(define listed-tools
+  (assoc-ref (assoc-ref (request "tools/list" '()) "result") "tools"))
+(test-equal "workspace tools are listed beside evaluate" "greet"
+  (assoc-ref (vector-ref listed-tools 1) "name"))
+(test-equal "workspace tools declare their schema" #("who")
+  (assoc-ref (assoc-ref (vector-ref listed-tools 1) "inputSchema") "required"))
+(test-equal "typed tool call returns plain text" "hi"
+  (assoc-ref (vector-ref (assoc-ref (tool-call-reply '((who . "hi"))) "content") 0) "text"))
+(test-equal "trailing optional arguments pass through" "hi hi"
+  (assoc-ref (vector-ref (assoc-ref (tool-call-reply '((who . "hi") (times . 2))) "content") 0) "text"))
+(define mistyped (tool-call-reply '((who . 3))))
+(test-equal "mistyped argument is a tool error" #t
+  (assoc-ref mistyped "isError"))
+(test-equal "tool errors read as messages, not exception records"
+  "Invalid or unexpected argument \"who\" 3"
+  (assoc-ref (vector-ref (assoc-ref mistyped "content") 0) "text"))
+(test-equal "missing required argument is a tool error" #t
+  (assoc-ref (tool-call-reply '()) "isError"))
+(test-equal "unexpected argument is a tool error" #t
+  (assoc-ref (tool-call-reply '((who . "hi") (extra . 1))) "isError"))
+(evaluate "(tool-remove! 'greet)")
 (test-equal "non-object arguments rejected" -32602
             (assoc-ref (assoc-ref (request "tools/call"
                                            '((name . "evaluate") (arguments . 7)))

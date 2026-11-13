@@ -1,7 +1,8 @@
 # Weft
 
-Weft is a live Scheme workspace for people and agents. One MCP `evaluate` tool
-accepts code. Definitions, subprocess jobs, event hooks and agent sessions belong
+Weft is a live Scheme workspace for people and agents. The MCP `evaluate` tool
+accepts code; the trusted workspace can also expose procedures as typed tools.
+Definitions, subprocess jobs, event hooks and agent sessions belong
 to the workspace host. A local daemon shares them across client connections.
 
 Define or redefine functions in later calls, or load an extension with
@@ -137,6 +138,23 @@ Each tick invokes up to four event hooks and one notification callback. Pending
 notifications retain the latest 256 messages and drop older deliveries on
 overflow. Delivery is best effort; a failing callback is disabled and its error
 enters the inbox. There is no automatic retry or durable delivery guarantee.
+
+## Typed tools
+
+```scheme
+(tool-define! 'emacs-show "Show FILE in the owner's Emacs." emacs-show
+  #:properties '((file (type . "string")) (line (type . "integer")))
+  #:required '(file))
+```
+
+`tools/list` returns each defined tool beside `evaluate`, with an input schema
+built from the properties. Types are `string`, `integer`, `number` and `boolean`;
+a property may add `(enum . #("a" "b"))`. `tools/call` checks the arguments,
+then applies the procedure positionally in property order; trailing absent
+arguments are dropped so the procedure's defaults apply. A failure returns an
+`isError` result with the message. Tools are not snapshotted, so define them from
+the initializer. The isolated room has none. `tool-list`, `tool-call` and
+`tool-remove!` inspect, invoke and remove them.
 
 ## Embedding and boundaries
 
