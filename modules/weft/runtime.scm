@@ -64,9 +64,9 @@
   "Describe this workspace's available operations and authority."
   (append
     '((evaluate . "Definitions survive calls. Exceptions preserve earlier effects; there is no rollback. Use workspace-state to detect a generation change.")
-      (saved . "(saved-set! 'name value) persists data; (saved-ref 'name) reads it. saved-define! takes a name and quoted expression; saved-list inspects definitions; saved-remove! stops restoring one. Recovery evaluates saved expressions: keep them free of external effects. %weft-messages is reserved for the shared inbox.")
-      (zones . "(zone-set! 'name 'text value) publishes a zone; (zone-ref 'name) reads its data. Types: text/table/metric/wiring. zone-list lists zones; zone-remove! removes one. Owner layout is controlled in the Emacs console.")
-      (collaboration . "Use the same endpoint: weft-room and trusted weft have separate state. (message-post! 'alice 'bob \"review ready\") adds a peer message without starting a turn or requiring approval. (message-inbox 'bob 0) returns (id sender text) entries after cursor 0; poll between work steps. Retains the latest 128 messages across recipients, 4096 characters each. Sender names are cooperative labels, not authenticated identities. This does not wake an idle agent. Use saved-set!/saved-ref for shared structured data and zone-set!/zone-ref for visible results.")
+      (saved . "(saved-set! 'name value) persists data; (saved-ref 'name) reads it, returning #f when absent or an optional fallback argument. saved-define! takes a name and quoted expression; saved-list inspects definitions; saved-remove! stops restoring one. Recovery evaluates saved expressions: keep them free of external effects. %weft-messages is reserved for the shared inbox.")
+      (zones . "(zone-set! 'name 'text value) publishes a zone; (zone-ref 'name) reads its data, returning #f when absent or an optional fallback argument. Types: text/table/metric/wiring. zone-list lists zones; zone-remove! removes one. Owner layout is controlled in the Emacs console.")
+      (collaboration . "Use the same endpoint: weft-room and trusted weft have separate state. (message-post! 'alice 'bob \"review ready\") adds a peer message without starting a turn or requiring approval. (message-inbox 'bob 0) returns (id sender text) entries after cursor 0. Evaluation is serialized: read once and return; wait OUTSIDE evaluate so peers can write. Never sleep or poll in a Scheme loop. Retains the latest 128 messages across recipients, 4096 characters each. Sender names are cooperative labels, not authenticated identities. This does not wake an idle agent. Use saved-set!/saved-ref for shared structured data and zone-set!/zone-ref for visible results.")
       (advice . "advice-add! takes a name, target, before/after/around kind, and procedure symbol. Targets include workspace-evaluate, workspace-tick and command-invoke targets. Around advice receives a zero-argument next procedure followed by the arguments. Use advice-list and advice-remove! to inspect or remove it.")
       (limits . "Results are bounded. Evaluation accepts a deadline up to 50 seconds. Retain large values and retrieve summaries."))
     (if (workspace-isolated? workspace)
@@ -119,9 +119,9 @@
         ((module-ref module 'saved-define!) name (list 'quote (copy-data value)))))
     (bind 'saved-list (lambda () (copy-data (workspace-saved workspace))))
     (bind 'saved-ref
-      (lambda (name)
-        (unless (assq name (workspace-saved workspace)) (error "Unknown saved value" name))
-        (copy-data (module-ref module name))))
+      (lambda* (name #:optional (fallback #f))
+        (if (assq name (workspace-saved workspace))
+            (copy-data (module-ref module name)) fallback)))
     (bind 'saved-remove!
       (lambda (name)
         (set-workspace-saved! workspace (alist-delete name (workspace-saved workspace)))
@@ -145,10 +145,9 @@
         (checkpoint! workspace) name))
     (bind 'zone-list (lambda () (copy-data (workspace-zones workspace))))
     (bind 'zone-ref
-      (lambda (name)
+      (lambda* (name #:optional (fallback #f))
         (let ((zone (assq-ref (workspace-zones workspace) name)))
-          (unless zone (error "Unknown zone" name))
-          (copy-data (cadr zone)))))
+          (if zone (copy-data (cadr zone)) fallback))))
     (bind 'zone-remove!
       (lambda (name)
         (set-workspace-zones! workspace (alist-delete name (workspace-zones workspace)))
@@ -205,6 +204,12 @@
         (begin
           (for-each (lambda (name) (module-remove! module name))
                     '(job-start job-list job-status job-wait job-cancel job-forget))
+          (for-each
+            (lambda (name)
+              (module-define! module name
+                (lambda args
+                  (error "The shared evaluator is serialized. Read once and wait outside evaluate so peers can write."))))
+            '(sleep usleep))
           (module-define! module 'effect-propose!
             (lambda (type payload)
               (unless (and (memq type '(notify write-file run session-send))

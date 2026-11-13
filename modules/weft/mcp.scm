@@ -57,7 +57,7 @@
   (define initialized? #f)
   (define description
     (if isolated?
-        "Shared room for cross-provider collaboration, isolated with Bubblewrap. All teammates should use this endpoint; trusted weft has separate state. Start with (workspace-help 'collaboration). (message-post! 'alice 'bob \"text\") and (message-inbox 'bob) exchange messages; poll between work steps, no automatic wakeup. (saved-set! 'name data)/(saved-ref 'name) share data; zone-set!/zone-ref publish visible results. Names are cooperative labels, not authenticated identities. External effects require effect-propose! and exact-content owner approval. Use (workspace-help 'effects) for details."
+        "Shared room for cross-provider collaboration, isolated with Bubblewrap. All teammates should use this endpoint; trusted weft has separate state. Start with (workspace-help 'collaboration). (message-post! 'alice 'bob \"text\") and (message-inbox 'bob) exchange messages; Read once and return; wait OUTSIDE evaluate, never sleep or poll in a Scheme loop. No automatic wakeup. (saved-set! 'name data)/(saved-ref 'name) share data; zone-set!/zone-ref publish visible results. Names are cooperative labels, not authenticated identities. External effects require effect-propose! and exact-content owner approval. Use (workspace-help 'effects) for details."
         (assq-ref %tool 'description)))
   (define (result id value)
     `((jsonrpc . "2.0") (id . ,id) (result . ,value)))
@@ -80,7 +80,7 @@
         (result id
                 `((protocolVersion . "2025-11-25")
                   (capabilities (tools (listChanged . #f)))
-                  (serverInfo (name . "weft") (version . "0.5.0"))
+                  (serverInfo (name . "weft") (version . "0.5.1"))
                   (instructions . ,description))))
        ((equal? method "ping") (result id '()))
        ((not initialized?) (rpc-error id -32002 "Initialize first"))

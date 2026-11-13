@@ -37,6 +37,14 @@
     (test-equal "shared live definitions" 9 (begin (evaluate "(define x 9)") (value "x")))
     (for-each
       (lambda (code)
+        (let ((reply (remote-evaluate socket-path code #:seconds 0.2)))
+          (test-equal "blocking wait is rejected instead of holding the room" 'error
+            (assq-ref reply 'status))
+          (test-assert "blocking wait explains how peers can proceed"
+            (string-contains (assq-ref reply 'value) "wait outside evaluate"))))
+      '("(sleep 10)" "(usleep 10000000)"))
+    (for-each
+      (lambda (code)
         (test-equal (string-append "denies " code) 'error (assq-ref (evaluate code) 'status)))
       '("(open-input-file \"/etc/passwd\")" "(system* \"sh\")"
         "(socket AF_INET SOCK_STREAM 0)" "(use-modules (ice-9 popen))"

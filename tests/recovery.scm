@@ -26,6 +26,8 @@
 (test-equal "zones survive restart" '((result metric 42)) (value "(zone-list)"))
 (test-equal "direct saved lookup" 21 (value "(saved-ref 'count)"))
 (test-equal "direct zone lookup" 42 (value "(zone-ref 'result)"))
+(test-equal "missing data can be polled without exception plumbing" '(#f waiting #f waiting)
+  (value "(list (saved-ref 'missing) (saved-ref 'missing 'waiting) (zone-ref 'missing) (zone-ref 'missing 'waiting))"))
 (test-equal "peer inbox survives restart" '((1 alice "Review ready"))
   (value "(message-inbox 'bob)"))
 (test-equal "peer reply filters recipient" '((2 bob "Please add boundary tests"))

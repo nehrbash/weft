@@ -43,7 +43,7 @@
                              (equal? (assoc-ref (response-headers response) 'sec-websocket-accept)
                                      (make-accept-key key)))
                   (error "Codex WebSocket handshake rejected"))))
-            (rpc "initialize" '((clientInfo . ((name . "weft") (version . "0.5.0")))
+            (rpc "initialize" '((clientInfo . ((name . "weft") (version . "0.5.1")))
                                 (capabilities . ((experimentalApi . #t)))))
             (send '((method . "initialized")))
             (procedure rpc))

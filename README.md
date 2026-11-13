@@ -29,7 +29,12 @@ tools do not address Weft agent names.
 (zone-ref 'progress)
 ```
 
-Poll the inbox between work steps. Messages are shared room data: they do not
+`saved-ref` and `zone-ref` return `#f` when absent, or an optional fallback.
+
+Read the inbox once per evaluation and return. Evaluations are serialized:
+sleeping or polling inside Scheme prevents peers from publishing the result
+being awaited. Wait outside `evaluate`; the isolated room rejects `sleep` and
+`usleep`. Messages are shared room data: they do not
 start a turn, notify the owner, require approval, or wake an idle agent. Sender
 and recipient symbols are cooperative labels, not authenticated identities.
 The latest 128 messages across recipients survive restart; each is limited to
