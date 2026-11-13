@@ -108,13 +108,13 @@
         (match-lambda
           ((name type data)
            (remote-evaluate worker-socket (object->string `(zone-set! ',name ',type ',data)))))
-        (assq-ref snapshot 'zones))
+        (reverse (assq-ref snapshot 'zones)))
       (for-each
         (match-lambda
           ((name target kind command)
            (remote-evaluate worker-socket
              (object->string `(advice-add! ',name ',target ',kind ',command)))))
-        (or (assq-ref snapshot 'advice) '())))
+        (reverse (or (assq-ref snapshot 'advice) '()))))
     (define (approve! id expected decision)
       (let ((proposal (assv-ref (assq-ref snapshot 'effects) id)))
         (unless (and proposal (eq? 'pending (assq-ref proposal 'state))

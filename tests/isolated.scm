@@ -57,10 +57,11 @@
       (assq-ref (owner 'decide 1 '(notify "approved text") 'approve) 'status))
     (value "(saved-set! 'durable 17)")
     (value "(zone-set! 'status 'text \"ready\")")
+    (value "(zone-set! 'count 'metric 17)")
     (evaluate "(effect-propose! 'notify \"pending across restart\")")
     (stop!) (start!)
     (test-equal "isolated state survives restart" 17 (value "durable"))
-    (test-equal "isolated zones survive restart" '((status text "ready")) (value "(zone-list)"))
+    (test-equal "isolated zones preserve order across restart" '((count metric 17) (status text "ready")) (value "(zone-list)"))
     (test-equal "pending request survives restart" 'ok
       (assq-ref (owner 'decide 2 '(notify "pending across restart") 'reject) 'status))
     (test-equal "archive removes decided proposal" 'ok (assq-ref (owner 'archive 1) 'status)))

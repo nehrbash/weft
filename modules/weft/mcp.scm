@@ -62,7 +62,7 @@
         (result id
                 `((protocolVersion . "2025-11-25")
                   (capabilities (tools (listChanged . #f)))
-                  (serverInfo (name . "weft") (version . "0.4.0"))
+                  (serverInfo (name . "weft") (version . "0.4.1"))
                   (instructions . ,description))))
        ((equal? method "ping") (result id '()))
        ((not initialized?) (rpc-error id -32002 "Initialize first"))
