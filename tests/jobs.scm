@@ -1,4 +1,5 @@
-(use-modules (weft jobs) (srfi srfi-64) (ice-9 threads))
+(use-modules (weft jobs) (srfi srfi-64) (ice-9 threads)
+  (rnrs bytevectors))
 
 (test-begin "jobs")
 (define manager (make-job-manager))
@@ -118,10 +119,20 @@
 (test-equal "cancel idempotent" cancelled (job-cancel manager long))
 (test-error "child reaped" #t (waitpid (field cancelled 'pid) WNOHANG))
 
-(define noisy
-  (start "sh" "-c"
-    "head -c 100000 /dev/zero | tr '\\000' x; printf END; printf '\\377' >&2"))
-(define noisy-result (job-wait manager noisy 3))
+(define largest-read 0)
+(define real-append-output! (module-ref jobs-module 'append-output!))
+(define noisy-result
+  (with-binding 'append-output!
+    (lambda (job bytes stderr?)
+      (set! largest-read (max largest-read (bytevector-length bytes)))
+      (real-append-output! job bytes stderr?))
+    (lambda ()
+      (let* ((id (start "sh" "-c"
+                   "head -c 100000 /dev/zero | tr '\\000' x; printf END; printf '\\377' >&2"))
+              (result (job-wait manager id 3)))
+        (job-forget manager id)
+        result))))
+(test-assert "output drained in chunks" (> largest-read 1))
 (test-equal "bounded output" 16384 (string-length (field noisy-result 'stdout)))
 (test-assert "output tail retained" (string-suffix? "END" (field noisy-result 'stdout)))
 (test-assert "truncation reported" (field noisy-result 'truncated))

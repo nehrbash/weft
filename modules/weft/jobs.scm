@@ -80,6 +80,8 @@
 
 (define (drain-job job stdout stderr)
   ;; Only subprocess I/O runs here: workspace evaluation owns SIGALRM.
+  ;; Unbuffered get-bytevector-some reads one byte per supervisor iteration.
+  (for-each (lambda (port) (setvbuf port 'block 8192)) (list stdout stderr))
   (let loop ((ports (list stdout stderr)) (status #f) (drain-deadline #f))
     (let* ((reaped (and (not status)
                      (with-mutex (job-mutex job)
