@@ -31,10 +31,11 @@
   (snapshots inspector-snapshots set-inspector-snapshots!))
 
 (define %diagnostics (make-parameter #f))
-(define %fields '(id provider source pid name cwd status updated-at note
+(define %fields '(id provider source pid tty thread delivery name cwd status updated-at note
                     request reply request-at reply-at turn association transcript))
 (define %overview '(id provider status name cwd request))
-(define %detail '(id provider source status cwd request reply request-at reply-at association transcript))
+(define %detail '(id provider source status cwd tty delivery request reply request-at reply-at
+                    association transcript))
 (define %activity '(request reply request-at reply-at turn association transcript))
 
 (define (diagnose provider operation target kind message)
@@ -77,6 +78,40 @@
          (fields (string-tokenize (substring text (+ 2 (string-rindex text #\)))))))
     (list-ref fields 19)))
 
+(define (process-tty proc pid)
+  (guarded 'process 'tty pid
+    (lambda ()
+      (let ((target (readlink (format #f "~a/~a/fd/0" proc pid))))
+        (and (string-prefix? "/dev/pts/" target) target)))
+    #:missing-ok? #t))
+
+(define (codex-process proc id)
+  "Return (pid cwd argv) for this user's interactive Codex process ID, or #f."
+  (let ((directory (string-append proc "/" id)))
+    (and (= (stat:uid (stat directory)) (getuid))
+         (string=? (basename (readlink (string-append directory "/exe"))) "codex")
+         (let ((argv (string-split
+                       (call-with-input-file (string-append directory "/cmdline") get-string-all)
+                       #\nul)))
+           (and (not (member "app-server" argv))
+                (list (string->number id) (readlink (string-append directory "/cwd")) argv))))))
+
+(define (resumed-thread argv)
+  (let ((tail (member "resume" argv)))
+    (and tail (pair? (cdr tail)) (not (string-null? (cadr tail)))
+         (not (string-prefix? "-" (cadr tail))) (cadr tail))))
+
+(define (codex-terminals proc)
+  "Map resumed thread IDs to (pid . tty); a fresh `codex` names no thread."
+  (filter-map
+    (lambda (id)
+      (match (guarded 'process 'inspect id (lambda () (codex-process proc id)) #:missing-ok? #t)
+        ((pid cwd argv)
+         (let ((thread (resumed-thread argv)))
+           (and thread (list thread pid (process-tty proc pid)))))
+        (_ #f)))
+    (filter string->number (or (entries proc) '()))))
+
 (define (claude-provider home proc)
   (let ((index (make-hash-table)) (directory (string-append home "/sessions")))
     (define (read-session path)
@@ -95,7 +130,8 @@
                      (string-append home "/projects/"
                        (string-map (lambda (c) (if (or (char-alphabetic? c) (char-numeric? c)) c #\-)) cwd)
                        "/" id ".jsonl")
-                     `((pid . ,pid) (name . ,(field data "name")) (cwd . ,cwd)
+                     `((pid . ,pid) (tty . ,(process-tty proc pid)) (delivery . watch-wait)
+                       (name . ,(field data "name")) (cwd . ,cwd)
                        (status . ,(string->symbol (or (field data "status") "unknown")))
                        (updated-at . ,(let ((at (field data "updatedAt")))
                                         (and (number? at) (quotient at 1000))))))))))
@@ -111,17 +147,22 @@
                           (and row (equal? (session-id row) (string-append "claude:" id)) row)))
               (find (lambda (row) (equal? (session-id row) (string-append "claude:" id))) (scan))))))))
 
-(define (codex-provider connect)
+(define (codex-provider connect proc)
+  (define terminals (make-parameter '()))
   (define (read-thread rpc id)
     (guarded 'codex 'thread-read id
       (lambda ()
         (let* ((data (required (rpc "thread/read" `((threadId . ,id))) "thread" list?))
                (status (required (field data "status") "type" string?)))
           (make-session (string-append "codex:" id) 'codex 'codex-app-server (field data "path")
-            `((name . ,(field data "name")) (cwd . ,(field data "cwd"))
+            `((pid . ,(let ((terminal (assoc-ref (terminals) id))) (and terminal (car terminal))))
+              (tty . ,(let ((terminal (assoc-ref (terminals) id))) (and terminal (cadr terminal))))
+              (delivery . codex-send)
+              (name . ,(field data "name")) (cwd . ,(field data "cwd"))
               (status . ,(string->symbol status)) (updated-at . ,(field data "updatedAt"))))))))
   (make-provider 'codex
     (lambda ()
+      (parameterize ((terminals (codex-terminals proc)))
       (connect (lambda (rpc)
         (let loop ((cursor #f) (seen '()) (rows '()))
           (let ((page (guarded 'codex 'thread-list cursor
@@ -138,23 +179,23 @@
                   (cond ((not next) result)
                         ((member next seen)
                          (diagnose 'codex 'thread-list next 'pagination "Repeated provider cursor.") result)
-                        (else (loop next (cons next seen) result))))))))))
-    (lambda (id) (connect (lambda (rpc) (read-thread rpc id))))))
+                        (else (loop next (cons next seen) result)))))))))))
+    (lambda (id)
+      (parameterize ((terminals (codex-terminals proc)))
+        (connect (lambda (rpc) (read-thread rpc id)))))))
 
 (define (process-provider proc)
   (define (lookup id)
-    (guarded 'process 'inspect id
-      (lambda ()
-        (let ((directory (string-append proc "/" id)))
-          (and (= (stat:uid (stat directory)) (getuid))
-               (string=? (basename (readlink (string-append directory "/exe"))) "codex")
-               (let ((argv (string-split
-                       (call-with-input-file (string-append directory "/cmdline") get-string-all) #\nul)))
-                 (and (not (member "app-server" argv))
-                   (make-session (string-append "process:" id) 'process 'process #f
-                     `((pid . ,(string->number id)) (cwd . ,(readlink (string-append directory "/cwd")))
-                       (status . unknown) (note . "Alive Codex process; session identity unresolved, may overlap a loaded thread."))))))))
-      #:missing-ok? #t))
+    (match (guarded 'process 'inspect id (lambda () (codex-process proc id)) #:missing-ok? #t)
+      ((pid cwd argv)
+       (let ((thread (resumed-thread argv)))
+         (make-session (string-append "process:" id) 'process 'process #f
+           `((pid . ,pid) (tty . ,(process-tty proc pid))
+             (thread . ,(and thread (string-append "codex:" thread))) (delivery . #f)
+             (cwd . ,cwd) (status . unknown)
+             (note . ,(if thread "Codex terminal for the named thread."
+                          "Alive Codex process; session identity unresolved, may overlap a loaded thread."))))))
+      (_ #f)))
   (make-provider 'process
     (lambda () (filter-map lookup (filter string->number (entries proc)))) lookup))
 
@@ -162,7 +203,7 @@
           (claude-home (or (getenv "CLAUDE_CONFIG_DIR") (string-append (getenv "HOME") "/.claude")))
           (proc "/proc") (connect call-with-codex))
   "Own provider adapters, transcript caches and bounded change history."
-  (%make-inspector (list (claude-provider claude-home proc) (codex-provider connect) (process-provider proc))
+  (%make-inspector (list (claude-provider claude-home proc) (codex-provider connect proc) (process-provider proc))
     (make-transcript-cache) (format #f "~a-~a-~a" (getpid) (gettimeofday) (gensym)) 0 '()))
 
 (define %default-inspector (delay (make-session-inspector)))

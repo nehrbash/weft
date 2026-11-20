@@ -329,6 +329,10 @@ Owner credentials are local-user capabilities, not protection against other
 programs running as that user. Do not give isolated clients the maintenance
 endpoint or owner-token file.
 
+Session rows can include `tty` and `pid` for the session's terminal and
+`delivery` (`codex-send` or `watch-wait`). Codex terminals are linked to a
+thread only when started as `codex resume ID`; process rows then report `thread`.
+
 ## Existing sessions and completion messages
 
 `session-send` accepts an existing Emacs ACP buffer name or `codex:THREAD-ID`.
