@@ -11,7 +11,7 @@
 
 (define-record-type <orchestration>
   (%make-orchestration manager module next agents turns events seen hooks messages
-                       notifications notifier commands closed?)
+                       notifications notifier commands watches notices closed?)
   orchestration?
   (manager manager)
   (module workspace-module)
@@ -25,10 +25,12 @@
   (notifications notifications set-notifications!)
   (notifier notifier set-notifier!)
   (commands commands set-commands!)
+  (watches watches set-watches!)
+  (notices notices set-notices!)
   (closed? closed? set-closed!))
 
 (define (make-orchestration manager module)
-  (%make-orchestration manager module 1 '() '() '() '() '() '() '() #f '() #f))
+  (%make-orchestration manager module 1 '() '() '() '() '() '() '() #f '() '() '() #f))
 
 (define (fresh-id! state)
   (let ((id (next-id state))) (set-next-id! state (+ id 1)) id))
@@ -107,14 +109,68 @@
               (min 256 (+ 1 (length (notifications state)))))))
     id))
 
+(define (valid-target? target)
+  (and (list? target) (= 2 (length target))
+       (case (car target)
+         ((session) (string? (cadr target)))
+         ((provider agent topic) (symbol? (cadr target)))
+         (else #f))))
+
+(define (watch! state subscriber target)
+  (ensure-open state)
+  (unless (and (symbol? subscriber) (valid-target? target))
+    (error "Expected subscriber symbol and target (session \"ID\"), (provider SYM), (agent SYM) or (topic SYM)"))
+  (let ((watch (list subscriber (copy-tree target))))
+    (unless (member watch (watches state))
+      (when (>= (length (watches state)) 128) (error "Watch limit reached"))
+      (set-watches! state (cons watch (watches state))))
+    watch))
+
+(define* (unwatch! state subscriber #:optional target)
+  (set-watches! state
+    (remove (lambda (watch)
+              (and (eq? subscriber (car watch)) (or (not target) (equal? target (cadr watch)))))
+            (watches state)))
+  #t)
+
+(define (notify-watchers! state targets kind source text)
+  (for-each
+    (lambda (subscriber)
+      (let ((notice `((id . ,(fresh-id! state)) (subscriber . ,subscriber) (kind . ,kind)
+                      (source . ,source) (text . ,(bounded text 4096)))))
+        (set-notices! state (take (cons notice (notices state))
+                                  (min 128 (+ 1 (length (notices state))))))))
+    (delete-duplicates
+      (filter-map (lambda (watch) (and (member (cadr watch) targets) (car watch)))
+                  (reverse (watches state))))))
+
+(define* (notice-inbox state subscriber #:optional (after 0))
+  (unless (and (symbol? subscriber) (exact-integer? after) (>= after 0))
+    (error "Expected subscriber symbol and nonnegative notice cursor"))
+  (copy-tree (reverse (filter (lambda (notice)
+                                (and (eq? subscriber (assq-ref notice 'subscriber))
+                                     (> (assq-ref notice 'id) after)))
+                              (notices state)))))
+
+(define (turn-finished! state provider session text)
+  (ensure-open state)
+  (unless (and (symbol? provider) (or (not session) (string? session)) (string? text))
+    (error "Expected provider symbol, session ID string or #f, and text"))
+  (let ((id (owner-post! state text #:from provider)))
+    (notify-watchers! state (cons `(provider ,provider) (if session `((session ,session)) '()))
+                      'turn-finished (or session provider) text)
+    id))
+
 (define (finish! state turn status text error)
   (set-field! turn 'state status)
   (set-field! turn 'text (and text (bounded text 16384)))
   (set-field! turn 'error (and error (bounded error 4096)))
   (set-field! turn 'prompt #f)
   (set-field! turn 'spec #f)
-  (owner-post! state (or (assq-ref turn 'error) (assq-ref turn 'text) (symbol->string status))
-               #:from (assq-ref turn 'agent) #:turn (assq-ref turn 'id)))
+  (let ((summary (or (assq-ref turn 'error) (assq-ref turn 'text) (symbol->string status))))
+    (owner-post! state summary #:from (assq-ref turn 'agent) #:turn (assq-ref turn 'id))
+    (notify-watchers! state `((agent ,(assq-ref turn 'agent))) 'turn-finished
+                      (assq-ref turn 'agent) summary)))
 
 (define (turn-cancel! state id)
   (let ((turn (find-turn state id)))
@@ -148,6 +204,8 @@
               (append (events state)
                       (list `((id . ,id) (topic . ,topic) (payload . ,(copy-tree payload))
                               (source . ,source) (depth . ,(+ 1 (current-event-depth)))))))
+            (notify-watchers! state `((topic ,topic)) 'event topic
+                              (bounded (object->string payload) 4096))
             (when key
               (set-seen! state
                 (take (acons dedup-key id (seen state))
@@ -292,7 +350,8 @@
   (copy-tree `((next . ,(next-id state)) (agents . ,(agents state))
                (turns . ,(turns state)) (seen . ,(seen state))
                (messages . ,(messages state)) (hooks . ,(hooks state))
-               (commands . ,(commands state)))))
+               (commands . ,(commands state)) (watches . ,(watches state))
+               (notices . ,(notices state)))))
 
 (define (orchestration-restore! state snapshot)
   (set-next-id! state (assq-ref snapshot 'next))
@@ -302,6 +361,8 @@
   (set-messages! state (assq-ref snapshot 'messages))
   (set-hooks! state (or (assq-ref snapshot 'hooks) '()))
   (set-commands! state (or (assq-ref snapshot 'commands) '()))
+  (set-watches! state (or (assq-ref snapshot 'watches) '()))
+  (set-notices! state (or (assq-ref snapshot 'notices) '()))
   (for-each
     (lambda (entry)
       (when (active? (cdr entry))
@@ -326,6 +387,13 @@
   (bind 'event-off! (lambda (name)
                      (set-hooks! state (alist-delete name (hooks state))) #t))
   (bind 'event-hooks (lambda () (copy-tree (hooks state))))
+  (bind 'watch! (lambda (subscriber target) (watch! state subscriber target)))
+  (bind 'unwatch! (lambda* (subscriber #:optional target) (unwatch! state subscriber target)))
+  (bind 'watch-list (lambda () (copy-tree (reverse (watches state)))))
+  (bind 'notice-inbox (lambda* (subscriber #:optional (after 0))
+                       (notice-inbox state subscriber after)))
+  (bind 'turn-finished! (lambda (provider session text)
+                         (turn-finished! state provider session text)))
   (bind 'owner-post! (lambda* (text #:key (from 'owner))
                       (owner-post! state text #:from from)))
   (bind 'owner-messages (lambda* (#:optional (after 0))
@@ -348,6 +416,7 @@
   (bind 'orchestration-state
     (lambda () `((agents . ,(length (agents state))) (turns . ,(length (turns state)))
                  (queued-events . ,(length (events state))) (messages . ,(length (messages state)))
+                 (watches . ,(length (watches state)))
                  (persistence . ,(let ((inspect (module-ref (workspace-module state) 'workspace-state #f)))
                                    (if inspect (assq-ref (inspect) 'persistence) 'process)))
                  (dedup-window . 256) (concurrency . 4)))))

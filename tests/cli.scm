@@ -10,7 +10,7 @@
 (define socket-path (string-append directory "/weft/room.sock"))
 (define child #f)
 
-(define (start! command)
+(define* (start! command #:optional (path socket-path))
   (force-output)
   (set! child (primitive-fork))
   (when (zero? child)
@@ -20,8 +20,8 @@
         (write args (current-error-port))
         (primitive-exit 1))))
   (let loop ((remaining 250))
-    (unless (and (file-exists? socket-path)
-                 (catch #t (lambda () (remote-evaluate socket-path "#t") #t)
+    (unless (and (file-exists? path)
+                 (catch #t (lambda () (remote-evaluate path "#t") #t)
                         (lambda _ #f)))
       (when (zero? remaining) (error "Workspace CLI did not start"))
       (usleep 20000)
@@ -40,6 +40,17 @@
          (reply (call-with-input-string (get-output-string output) read)))
     (unless (zero? status) (error "CLI evaluation failed" reply))
     (call-with-input-string (assq-ref reply 'value) read)))
+
+(define* (run args #:optional (input ""))
+  (let* ((output (open-output-string))
+         (status (parameterize ((current-output-port output)
+                                (current-input-port (open-input-string input)))
+                   (main args))))
+    (cons status (let ((text (get-output-string output)))
+                   (and (not (string-null? text)) (json-string->scm text))))))
+
+(define (entry-texts reply)
+  (map (lambda (entry) (assoc-ref entry "text")) (vector->list (assoc-ref (cdr reply) "entries"))))
 
 (define (bridge command)
   (let ((port (open-pipe* OPEN_BOTH "guile" "--no-auto-compile"
@@ -87,7 +98,25 @@
     (stop!)
     (start! "room-daemon")
     (test-equal "legacy daemon recovers canonical saved state" 42
-      (evaluate "workspace-eval" "(saved-ref 'cli-value)")))
+      (evaluate "workspace-eval" "(saved-ref 'cli-value)"))
+    (evaluate "workspace-eval" "(message-post! 'codex 'claude \"review ready\")")
+    (let ((reply (run '("wait" "--workspace" "claude" "0" "5"))))
+      (test-equal "workspace wait returns peer messages" '(0 "review ready")
+        (cons (car reply) (entry-texts reply)))
+      (test-equal "workspace wait reports a timeout past the cursor" 3
+        (car (run (list "wait" "--workspace" "claude"
+                        (number->string (assoc-ref (cdr reply) "cursor")) "1")))))
+    (stop!)
+    (let ((trusted (string-append directory "/weft/workspace.sock")))
+      (start! "daemon" trusted)
+      (evaluate "eval" "(watch! 'claude '(session \"codex:t1\"))")
+      (run '("notify-hook" "codex") "{\"session_id\":\"t2\",\"last_assistant_message\":\"other\"}")
+      (run '("notify-hook" "codex") "{\"session_id\":\"t1\",\"last_assistant_message\":\"renamed\"}")
+      (let ((reply (run '("wait" "claude" "0" "5"))))
+        (test-equal "notify-hook wakes only the session's watchers" '(0 "renamed")
+          (cons (car reply) (entry-texts reply))))
+      (test-equal "notify-hook keeps the owner post" 2
+        (length (evaluate "eval" "(owner-messages)")))))
   (lambda ()
     (stop!)
     (if runtime (setenv "XDG_RUNTIME_DIR" runtime) (unsetenv "XDG_RUNTIME_DIR"))

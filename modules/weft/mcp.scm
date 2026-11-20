@@ -120,7 +120,7 @@
                 `((protocolVersion . "2025-11-25")
                   (capabilities (tools (listChanged . #f)))
                   (serverInfo (name . ,(if isolated? "weft-workspace" "weft"))
-                              (version . "0.7.1"))
+                              (version . "0.8.0"))
                   (instructions . ,description))))
        ((equal? method "ping") (result id '()))
        ((not initialized?) (rpc-error id -32002 "Initialize first"))

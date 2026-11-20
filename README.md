@@ -51,6 +51,30 @@ Use `agent-send!` on the trusted endpoint when another **turn** is needed.
 It queues behind running work; a prompt can become stale before delivery.
 Check the latest inbox and shared state before acting on a queued request.
 
+### Waiting for peers
+
+An agent learns of a peer's progress by watching it on the trusted endpoint and
+waiting outside evaluation:
+
+```scheme
+(watch! 'claude '(session "codex:THREAD-ID")) ; or (provider codex), (agent NAME), (topic SYM)
+(notice-inbox 'claude 0)                       ; ((id subscriber kind source text) ...)
+```
+
+```sh
+weft wait claude [CURSOR [SECONDS]]               # trusted notices
+weft wait --workspace claude [CURSOR [SECONDS]]   # isolated message-inbox
+```
+
+`weft wait` polls once per second, prints `{"cursor": N, "entries": [...]}` for
+the first entries after CURSOR and exits 0, or exits 3 after SECONDS (default
+3600). A Claude Code session runs it as a background command so its exit starts
+the next turn; pass the printed cursor to the next wait. Stop-hook completions
+notify `session` and `provider` watchers, `agent-send!` completions notify
+`agent` watchers, and `event-emit!` notifies `topic` watchers. The latest 128
+notices and up to 128 watches survive restart. `unwatch!` removes one target or
+all of a subscriber's; `watch-list` inspects them.
+
 ## Run
 
 ```sh
@@ -306,7 +330,8 @@ Sending to a session is an approved effect; receipt means queued, not completed.
 
 Configure a Claude or Codex `Stop` command hook as `weft notify-hook claude` or
 `weft notify-hook codex`. The hook consumes JSON on stdin and posts a bounded
-completion message to the maintenance workspace's owner inbox. Configure
+completion message to the maintenance workspace's owner inbox and notifies
+watchers of the hook's `session_id`. Configure
 `owner-notify!` there for desktop delivery. Merely connecting an MCP client
 does not enable automatic completion messages.
 

@@ -79,11 +79,64 @@
          (text (or (assoc-ref event "last_assistant_message")
                    (assoc-ref event "last_agent_message")
                    (string-append provider " finished a turn")))
-         (summary (substring text 0 (min (string-length text) 500))))
-    (let ((reply (remote-evaluate (default-socket-path)
-                   (object->string `(owner-post! ,summary #:from ',(string->symbol provider))))))
-      (unless (eq? 'ok (assq-ref reply 'status)) (error "Owner message was not accepted")))
+         (summary (substring text 0 (min (string-length text) 500)))
+         (id (assoc-ref event "session_id"))
+         (session (and (string? id) (string-append provider ":" id)))
+         (sender (string->symbol provider)))
+    (define (accepted? code)
+      (eq? 'ok (assq-ref (remote-evaluate (default-socket-path) (object->string code)) 'status)))
+    ;; A daemon older than turn-finished! still accepts the owner post.
+    (unless (or (accepted? `(turn-finished! ',sender ,session ,summary))
+                (accepted? `(owner-post! ,summary #:from ',sender)))
+      (error "Owner message was not accepted"))
     0))
+
+(define (json-entry entry)
+  (map (lambda (field)
+         (cons (car field) (if (symbol? (cdr field)) (symbol->string (cdr field)) (cdr field))))
+       entry))
+
+(define (wait-command args)
+  "Print the first notices or isolated messages for NAME after a cursor; exit 3 on timeout."
+  (let* ((workspace? (and (pair? args) (equal? (car args) "--workspace")))
+         (args (if workspace? (cdr args) args)))
+    (match args
+      ((name . rest)
+       (let* ((after (if (pair? rest) (string->number (car rest)) 0))
+              (seconds (if (and (pair? rest) (pair? (cdr rest))) (string->number (cadr rest)) 3600))
+              (recipient (string->symbol name))
+              (path (if workspace? (room-socket) (default-socket-path)))
+              (code (object->string (if workspace?
+                                        `(message-inbox ',recipient ,after)
+                                        `(notice-inbox ',recipient ,after))))
+              (deadline (+ (current-time) seconds)))
+         (define (entries)
+           (catch #t
+             (lambda ()
+               (let ((reply (remote-evaluate path code)))
+                 (if (eq? 'ok (assq-ref reply 'status))
+                     (call-with-input-string (assq-ref reply 'value) read)
+                     (error "Wait query failed" (assq-ref reply 'value)))))
+             ;; Keep waiting while the daemon restarts; a bad query still fails.
+             (lambda (key . args)
+               (if (eq? key 'system-error) '() (apply throw key args)))))
+         (define (report found)
+           (let ((found (if workspace?
+                            (map (match-lambda ((id from text) `((id . ,id) (from . ,from) (text . ,text))))
+                                 found)
+                            found)))
+             (display (scm->json-string
+                        `((cursor . ,(apply max after (map (lambda (entry) (assq-ref entry 'id)) found)))
+                          (entries . ,(list->vector (map json-entry found))))))
+             (newline)))
+         (unless (and (exact-integer? after) (>= after 0) (real? seconds) (> seconds 0))
+           (error "Expected nonnegative cursor and positive seconds"))
+         (let loop ()
+           (let ((found (entries)))
+             (cond ((pair? found) (report found) 0)
+                   ((>= (current-time) deadline) (report '()) 3)
+                   (else (sleep 1) (loop)))))))
+      (_ (error "Usage: weft wait [--workspace] NAME [CURSOR [SECONDS]]")))))
 
 (define (default-socket-path)
   "Return this user's local workspace socket path."
@@ -122,6 +175,7 @@
     (("owner" "inspect") (owner 'inspect '()))
     (("owner" "view") (owner-view))
     (("notify-hook" provider) (notify-hook provider))
+    (("wait" . rest) (wait-command rest))
     (("inbox")
      (let ((reply (remote-evaluate (default-socket-path) "(owner-messages)")))
        (unless (eq? 'ok (assq-ref reply 'status)) (error "Owner inbox unavailable"))
@@ -145,6 +199,6 @@
                          (string->symbol decision))))
     (("eval" code) (evaluate (default-socket-path) code))
     (("eval" path code) (evaluate path code))
-    (_ (display "Usage: weft [standalone | daemon [SOCKET [STATE]] | connect [SOCKET] | eval [SOCKET] CODE | workspace-daemon | connect-workspace | workspace-eval CODE | owner inspect | owner approve/reject ID EXPECTED | owner archive ID]\n"
+    (_ (display "Usage: weft [standalone | daemon [SOCKET [STATE]] | connect [SOCKET] | eval [SOCKET] CODE | workspace-daemon | connect-workspace | workspace-eval CODE | wait [--workspace] NAME [CURSOR [SECONDS]] | owner inspect | owner approve/reject ID EXPECTED | owner archive ID]\n"
                 (current-error-port))
        2)))
