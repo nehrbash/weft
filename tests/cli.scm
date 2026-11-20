@@ -72,6 +72,11 @@
             (assoc-ref (vector-ref (assoc-ref (request 2 "tools/list" '()) "tools") 0)
                        "description")
             "Shared workspace"))
+        (test-assert "isolated bridge explains how to be woken"
+          (string-contains
+            (assoc-ref (vector-ref (assoc-ref (request 2 "tools/list" '()) "tools") 0)
+                       "description")
+            "weft wait --workspace"))
         (let* ((reply (request 3 "tools/call"
                        '((name . "evaluate")
                          (arguments (code . "(saved-ref 'cli-value)") (format . "record")))))

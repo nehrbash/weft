@@ -61,6 +61,11 @@
     (assoc-ref (vector-ref (assoc-ref (assoc-ref (request "tools/list" '()) "result")
                                     "tools") 0) "description")
     "weft-workspace"))
+(test-assert "trusted endpoint tells agents to watch peers they hand work to"
+  (string-contains
+    (assoc-ref (vector-ref (assoc-ref (assoc-ref (request "tools/list" '()) "result")
+                                    "tools") 0) "description")
+    "weft wait me"))
 (define compact-code "'((alice \"Review ready\") (bob \"Tests pass\"))")
 (define compact-reply
   (assoc-ref (vector-ref (assoc-ref (assoc-ref
