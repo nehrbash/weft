@@ -21,5 +21,15 @@
 (test-equal "unloaded task resumes without model or permission overrides"
   '("thread/queue/start" "thread/queue/add" "thread/resume" "thread/read") (map car calls))
 (test-equal "resume only identifies existing task" '((threadId . "existing")) (cdr (list-ref calls 2)))
+(define start-error #f)
+(define (racing-rpc method params)
+  (if (equal? method "thread/queue/start")
+      (error "Codex request failed" method start-error)
+      (begin (set! status "idle") (rpc method params))))
+(set! start-error '(("message" . "queued submission not found: queued")))
+(test-assert "attached terminal that already started the submission is success"
+  (codex-send racing-rpc "existing" "hello"))
+(set! start-error '(("message" . "thread is archived")))
+(test-error "other start failures still raise" #t (codex-send racing-rpc "existing" "hello"))
 (test-end "sessions")
 (exit (if (zero? (test-runner-fail-count runner)) 0 1))

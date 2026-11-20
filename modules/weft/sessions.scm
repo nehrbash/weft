@@ -63,9 +63,17 @@
                       (input . #(((type . "text") (text . ,prompt)))))))
            (submission (assoc-ref queued "queuedSubmission")))
       (unless (equal? status "active")
-        (rpc "thread/queue/start"
-             `((threadId . ,thread)
-               ,@(if submission `((queuedSubmissionId . ,(assoc-ref submission "id"))) '()))))
+        ;; An attached Codex terminal may start the submission first.
+        (catch #t
+          (lambda ()
+            (rpc "thread/queue/start"
+                 `((threadId . ,thread)
+                   ,@(if submission `((queuedSubmissionId . ,(assoc-ref submission "id"))) '()))))
+          (lambda (key . args)
+            (unless (string-contains (call-with-output-string
+                                       (lambda (port) (write args port)))
+                                     "queued submission not found")
+              (apply throw key args)))))
       queued)))
 
 (define (codex-list rpc)
