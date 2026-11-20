@@ -236,6 +236,39 @@
   (call 'unwatch! 'claude-worker)
   (call 'unwatch! 'failing))
 
+(define claim-root (mkdtemp "/tmp/weft-claims-XXXXXX"))
+(mkdir (string-append claim-root "/docs"))
+(call-with-output-file (string-append claim-root "/docs/plan.org") (lambda (port) (display "x" port)))
+(symlink (string-append claim-root "/docs") (string-append claim-root "/alias"))
+(define plan (string-append claim-root "/docs/plan.org"))
+(call 'claim! "codex:lead" (list (string-append claim-root "/docs")))
+(test-equal "directory claim covers files inside it" "codex:lead"
+  (call 'claim-check "claude:owner" plan))
+(test-equal "holder is not blocked by its own claim" #f (call 'claim-check "codex:lead" plan))
+(test-equal "aliases resolve to the claimed path" "codex:lead"
+  (call 'claim-check "claude:owner" (string-append claim-root "/alias/plan.org")))
+(test-equal "new files under a claim are covered" "codex:lead"
+  (call 'claim-check "claude:owner" (string-append claim-root "/docs/new/file.org")))
+(test-error "conflicting claim is refused" #t (call 'claim! "claude:owner" (list plan)))
+(test-error "claims need a session ID holder" #t (call 'claim! "owner" (list plan)))
+(call 'claim! "claude:owner" (list (string-append claim-root "/notes.org")) #:sticky #t)
+(call 'watch! 'claims-waiter '(topic resource-released))
+(call 'turn-finished! 'codex "codex:lead" "done")
+(test-equal "holder's turn end releases transient claims" #f (call 'claim-check "claude:owner" plan))
+(test-assert "release wakes topic watchers"
+  (string-contains (assq-ref (car (last-pair (call 'notice-inbox 'claims-waiter))) 'text) "codex:lead"))
+(call 'turn-finished! 'claude "claude:owner" "done")
+(test-equal "sticky claims outlive the turn" "claude:owner"
+  (call 'claim-check "codex:lead" (string-append claim-root "/notes.org")))
+(test-equal "claims survive restart" (call 'claim-list)
+  (let* ((module (make-module)) (restored (make-orchestration (make-job-manager) module)))
+    (orchestration-restore! restored (orchestration-snapshot state))
+    (install-orchestration-bindings! restored)
+    ((module-ref module 'claim-list))))
+(test-equal "explicit release frees a sticky claim" (list (string-append claim-root "/notes.org"))
+  (call 'claim-release! "claude:owner"))
+(call 'unwatch! 'claims-waiter)
+
 (define other-manager (make-job-manager))
 (define other-module (make-module))
 (define other (make-orchestration other-manager other-module))

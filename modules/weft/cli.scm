@@ -8,6 +8,7 @@
   #:use-module (rnrs bytevectors)
   #:use-module (json)
   #:use-module (ice-9 match)
+  #:use-module (srfi srfi-1)
   #:export (main default-socket-path))
 
 (define (room-socket) (string-append (dirname (default-socket-path)) "/room.sock"))
@@ -90,6 +91,69 @@
                 (accepted? `(owner-post! ,summary #:from ',sender)))
       (error "Owner message was not accepted"))
     0))
+
+(define (claim-conflicts session paths)
+  "Return ((path . holder) ...) for PATHS another session holds, or #f if Weft is down."
+  (catch #t
+    (lambda ()
+      (let ((reply (remote-evaluate (default-socket-path)
+                     (object->string
+                       `(filter pair?
+                                (map (lambda (path)
+                                       (let ((holder (claim-check ,session path)))
+                                         (and holder (cons path holder))))
+                                     ',paths))))))
+        (and (eq? 'ok (assq-ref reply 'status))
+             (call-with-input-string (assq-ref reply 'value) read))))
+    (lambda _ #f)))
+
+(define (report-conflicts conflicts)
+  "Explain held paths on stderr and return the blocking exit code."
+  (for-each (lambda (conflict)
+              (format (current-error-port)
+                      "~a is claimed by ~a. Wait for (topic resource-released) with watch!, or ask the owner.~%"
+                      (car conflict) (cdr conflict)))
+            conflicts)
+  2)
+
+(define (patch-paths text)
+  (filter-map (lambda (line)
+                (let ((match (find (lambda (prefix) (string-prefix? prefix line))
+                                   '("*** Add File: " "*** Update File: " "*** Delete File: " "*** Move to: "))))
+                  (and match (string-trim-both (substring line (string-length match))))))
+              (string-split text #\newline)))
+
+(define (hook-paths event)
+  "Collect file paths a PreToolUse event would write, absolute against its cwd."
+  (let* ((input (or (assoc-ref event "tool_input") '()))
+         (cwd (or (assoc-ref event "cwd") (getcwd)))
+         (direct (filter-map (lambda (key)
+                               (let ((value (and (list? input) (assoc-ref input key))))
+                                 (and (string? value) value)))
+                             '("file_path" "notebook_path" "path")))
+         (strings (let collect ((value input))
+                    (cond ((string? value) (list value))
+                          ((pair? value) (append (collect (car value)) (collect (cdr value))))
+                          ((vector? value) (append-map collect (vector->list value)))
+                          (else '()))))
+         (patched (append-map patch-paths (filter (lambda (text) (string-contains text "*** Begin Patch"))
+                                                  strings))))
+    (delete-duplicates
+      (map (lambda (path) (if (string-prefix? "/" path) path (string-append cwd "/" path)))
+           (append direct patched)))))
+
+(define (claim-hook provider)
+  "PreToolUse hook: refuse a write to a path another session has claimed."
+  (let* ((event (json->scm (current-input-port)))
+         (id (assoc-ref event "session_id"))
+         (paths (hook-paths event)))
+    (if (or (null? paths) (not (string? id)))
+        0
+        (let ((conflicts (claim-conflicts (string-append provider ":" id) paths)))
+          (if (pair? conflicts) (report-conflicts conflicts) 0)))))
+
+(define (canonicalize-or-self path)
+  (if (string-prefix? "/" path) path (string-append (getcwd) "/" path)))
 
 (define (json-entry entry)
   (map (lambda (field)
@@ -180,6 +244,22 @@
     (("owner" "view") (owner-view))
     (("notify-hook" provider) (notify-hook provider))
     (("wait" . rest) (wait-command rest))
+    (("claim-hook" provider)
+     ;; A broken hook must never block an agent's edit.
+     (catch #t (lambda () (claim-hook provider))
+       (lambda (key . args)
+         (format (current-error-port) "weft claim-hook: ~a ~s; claims not checked~%" key args)
+         0)))
+    (("claim-check" session . paths)
+     (let ((conflicts (claim-conflicts session (map canonicalize-or-self paths))))
+       (cond ((not conflicts) (display "Weft unavailable; claims not checked\n" (current-error-port)) 0)
+             ((pair? conflicts) (report-conflicts conflicts))
+             (else 0))))
+    (("claim" holder . paths)
+     (evaluate (default-socket-path) (object->string `(claim! ,holder ',(map canonicalize-or-self paths)))))
+    (("release" holder . paths)
+     (evaluate (default-socket-path)
+               (object->string `(claim-release! ,holder ,@(if (null? paths) '() `(',(map canonicalize-or-self paths)))))))
     (("inbox")
      (let ((reply (remote-evaluate (default-socket-path) "(owner-messages)")))
        (unless (eq? 'ok (assq-ref reply 'status)) (error "Owner inbox unavailable"))
@@ -203,6 +283,6 @@
                          (string->symbol decision))))
     (("eval" code) (evaluate (default-socket-path) code))
     (("eval" path code) (evaluate path code))
-    (_ (display "Usage: weft [standalone | daemon [SOCKET [STATE]] | connect [SOCKET] | eval [SOCKET] CODE | workspace-daemon | connect-workspace | workspace-eval CODE | wait [--workspace] NAME [CURSOR [SECONDS]] | owner inspect | owner approve/reject ID EXPECTED | owner archive ID]\n"
+    (_ (display "Usage: weft [standalone | daemon [SOCKET [STATE]] | connect [SOCKET] | eval [SOCKET] CODE | workspace-daemon | connect-workspace | workspace-eval CODE | wait [--workspace] NAME [CURSOR [SECONDS]] | claim HOLDER PATH... | release HOLDER [PATH...] | claim-check SESSION PATH... | claim-hook PROVIDER | owner inspect | owner approve/reject ID EXPECTED | owner archive ID]\n"
                 (current-error-port))
        2)))

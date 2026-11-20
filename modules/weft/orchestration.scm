@@ -12,7 +12,7 @@
 
 (define-record-type <orchestration>
   (%make-orchestration manager module next agents turns events seen hooks messages
-                       notifications notifier commands watches notices deliveries pushed closed?)
+                       notifications notifier commands watches notices deliveries pushed claims closed?)
   orchestration?
   (manager manager)
   (module workspace-module)
@@ -30,10 +30,11 @@
   (notices notices set-notices!)
   (deliveries deliveries set-deliveries!)
   (pushed pushed set-pushed!)
+  (claims claims set-claims!)
   (closed? closed? set-closed!))
 
 (define (make-orchestration manager module)
-  (%make-orchestration manager module 1 '() '() '() '() '() '() '() #f '() '() '() '() '() #f))
+  (%make-orchestration manager module 1 '() '() '() '() '() '() '() #f '() '() '() '() '() '() #f))
 
 (define (fresh-id! state)
   (let ((id (next-id state))) (set-next-id! state (+ id 1)) id))
@@ -231,6 +232,74 @@
                                      (> (assq-ref notice 'id) after)))
                               (notices state)))))
 
+(define (canonical-path path)
+  "Resolve PATH's existing prefix so aliases of one file compare equal."
+  (unless (and (string? path) (string-prefix? "/" path))
+    (error "Expected an absolute path" path))
+  (let loop ((head path) (tail '()))
+    (cond ((file-exists? head)
+           (let ((root (canonicalize-path head)))
+             (if (null? tail) root
+                 (string-append (if (string=? root "/") "" root) "/" (string-join tail "/")))))
+          ((string=? head "/") path)
+          (else (loop (dirname head) (cons (basename head) tail))))))
+
+(define (covers? outer inner)
+  (or (string=? outer inner) (string-prefix? (string-append outer "/") inner)))
+
+(define (valid-holder? holder)
+  (and (string? holder) (<= 3 (string-length holder) 256) (string-index holder #\:)))
+
+(define (claim-conflict state holder path)
+  (find (lambda (claim)
+          (let ((other (assq-ref claim 'path)))
+            (and (not (equal? holder (assq-ref claim 'holder)))
+                 (or (covers? other path) (covers? path other)))))
+        (claims state)))
+
+(define (claim-check state holder path)
+  (let ((conflict (claim-conflict state holder (canonical-path path))))
+    (and conflict (assq-ref conflict 'holder))))
+
+(define* (claim! state holder paths #:key sticky?)
+  (ensure-open state)
+  (unless (and (valid-holder? holder) (list? paths) (<= 1 (length paths) 64))
+    (error "Expected a session ID holder (provider:id) and 1..64 absolute paths"))
+  (let ((wanted (delete-duplicates (map canonical-path paths))))
+    (for-each (lambda (path)
+                (let ((conflict (claim-conflict state holder path)))
+                  (when conflict
+                    (error (format #f "~a is claimed by ~a" path (assq-ref conflict 'holder))))))
+              wanted)
+    (let ((fresh (filter (lambda (path)
+                           (not (find (lambda (claim) (and (equal? holder (assq-ref claim 'holder))
+                                                            (equal? path (assq-ref claim 'path))))
+                                      (claims state))))
+                         wanted)))
+      (when (> (+ (length fresh) (length (claims state))) 256) (error "Claim limit reached"))
+      (set-claims! state (append (claims state)
+                                 (map (lambda (path) `((path . ,path) (holder . ,holder) (sticky . ,(and sticky? #t))))
+                                      fresh)))
+      wanted)))
+
+(define* (claim-release! state holder #:optional paths #:key (only-transient? #f))
+  (let* ((wanted (and paths (map canonical-path paths)))
+         (released (filter (lambda (claim)
+                             (and (equal? holder (assq-ref claim 'holder))
+                                  (or (not wanted) (member (assq-ref claim 'path) wanted))
+                                  (not (and only-transient? (assq-ref claim 'sticky)))))
+                           (claims state))))
+    (unless (null? released)
+      (set-claims! state (remove (lambda (claim) (memq claim released)) (claims state)))
+      (catch #t
+        (lambda ()
+          (event-emit! state 'resource-released
+                       `((kind . path) (holder . ,holder)
+                         (paths . ,(map (lambda (claim) (assq-ref claim 'path)) released)))
+                       #:source 'weft))
+        (lambda _ #f)))
+    (map (lambda (claim) (assq-ref claim 'path)) released)))
+
 (define (turn-finished! state provider session text)
   (ensure-open state)
   (unless (and (symbol? provider) (or (not session) (string? session)) (string? text))
@@ -244,6 +313,7 @@
       (set-pushed! state (acons session (list (car mark) #f) (alist-delete session (pushed state)))))
     (notify-watchers! state (cons `(provider ,provider) (if session `((session ,session)) '()))
                       'turn-finished (or session provider) text #:deliver? (not reply?))
+    (when session (claim-release! state session #:only-transient? #t))
     id))
 
 (define (finish! state turn status text error)
@@ -437,7 +507,7 @@
                (turns . ,(turns state)) (seen . ,(seen state))
                (messages . ,(messages state)) (hooks . ,(hooks state))
                (commands . ,(commands state)) (watches . ,(watches state))
-               (notices . ,(notices state)))))
+               (notices . ,(notices state)) (claims . ,(claims state)))))
 
 (define (orchestration-restore! state snapshot)
   (set-next-id! state (assq-ref snapshot 'next))
@@ -449,6 +519,7 @@
   (set-commands! state (or (assq-ref snapshot 'commands) '()))
   (set-watches! state (or (assq-ref snapshot 'watches) '()))
   (set-notices! state (or (assq-ref snapshot 'notices) '()))
+  (set-claims! state (or (assq-ref snapshot 'claims) '()))
   (for-each
     (lambda (entry)
       (when (active? (cdr entry))
@@ -476,6 +547,10 @@
   (bind 'watch! (lambda* (subscriber target #:key deliver)
                   (watch! state subscriber target #:deliver deliver)))
   (bind 'delivery-list (lambda () (copy-tree (deliveries state))))
+  (bind 'claim! (lambda* (holder paths #:key sticky) (claim! state holder paths #:sticky? sticky)))
+  (bind 'claim-release! (lambda* (holder #:optional paths) (claim-release! state holder paths)))
+  (bind 'claim-check (lambda (holder path) (claim-check state holder path)))
+  (bind 'claim-list (lambda () (copy-tree (claims state))))
   (bind 'unwatch! (lambda* (subscriber #:optional target) (unwatch! state subscriber target)))
   (bind 'watch-list (lambda () (copy-tree (reverse (watches state)))))
   (bind 'notice-inbox (lambda* (subscriber #:optional (after 0))

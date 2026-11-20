@@ -47,7 +47,8 @@
                                 (current-input-port (open-input-string input)))
                    (main args))))
     (cons status (let ((text (get-output-string output)))
-                   (and (not (string-null? text)) (json-string->scm text))))))
+                   (and (not (string-null? text))
+                        (false-if-exception (json-string->scm text)))))))
 
 (define (entry-texts reply)
   (map (lambda (entry) (assoc-ref entry "text")) (vector->list (assoc-ref (cdr reply) "entries"))))
@@ -132,7 +133,34 @@
         (evaluate "eval" "(watch! 'survivor '(session \"codex:t1\"))")
         (run '("notify-hook" "codex") "{\"session_id\":\"t1\",\"last_assistant_message\":\"after restart\"}")
         (test-equal "wait survives a daemon restart" 0
-          (status:exit-val (cdr (waitpid waiter)))))))
+          (status:exit-val (cdr (waitpid waiter)))))
+      (let* ((held (string-append directory "/held.org"))
+             (edit (lambda (session path)
+                     (scm->json-string `((session_id . ,session) (tool_name . "Edit")
+                                         (tool_input . ((file_path . ,path)))))))
+             (patch (lambda (session file)
+                      (scm->json-string
+                        `((session_id . ,session) (cwd . ,directory) (tool_name . "apply_patch")
+                          (tool_input . ((command . ,(string-append "*** Begin Patch\n*** Update File: "
+                                                                     file "\n@@\n-a\n+b\n*** End Patch\n")))))))))
+        (run (list "claim" "codex:t1" held))
+        (test-equal "Claude edit of a claimed file is denied" 2
+          (car (run '("claim-hook" "claude") (edit "owner" held))))
+        (test-equal "holder's own edit passes" 0
+          (car (run '("claim-hook" "codex") (edit "t1" held))))
+        (test-equal "Codex patch to a claimed relative path is denied" 2
+          (car (run '("claim-hook" "codex") (patch "other" "held.org"))))
+        (test-equal "malformed hook input does not block" 0
+          (car (run '("claim-hook" "claude") "not json")))
+        (test-equal "unclaimed paths pass" 0
+          (car (run '("claim-hook" "claude") (edit "owner" (string-append directory "/free.org")))))
+        (run (list "release" "codex:t1"))
+        (test-equal "release frees the path" 0
+          (car (run '("claim-hook" "claude") (edit "owner" held))))
+        (run (list "claim" "codex:t1" held))
+        (stop!)
+        (test-equal "hook fails open when Weft is down" 0
+          (car (run '("claim-hook" "claude") (edit "owner" held)))))))
   (lambda ()
     (stop!)
     (if runtime (setenv "XDG_RUNTIME_DIR" runtime) (unsetenv "XDG_RUNTIME_DIR"))

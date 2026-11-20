@@ -333,6 +333,30 @@ Session rows can include `tty` and `pid` for the session's terminal and
 `delivery` (`codex-send` or `watch-wait`). Codex terminals are linked to a
 thread only when started as `codex resume ID`; process rows then report `thread`.
 
+### Claiming paths
+
+Agents are honest but uncoordinated, so Weft records who is working where and
+the harnesses refuse edits that would collide:
+
+```scheme
+(claim! "codex:THREAD-ID" '("/home/me/doc/projects/hearth"))  ; at handoff
+(claim-check "claude:SESSION" "/home/me/doc/projects/hearth/plan.org") ; => "codex:THREAD-ID"
+(claim-release! "codex:THREAD-ID")
+```
+
+Holders are native session IDs. Paths are canonicalised, so symlinks and
+not-yet-created files resolve to the claimed location, and a directory claim
+covers everything below it. A holder's claims end when its turn finishes
+(Stop hook) unless made with `#:sticky #t`; every release emits
+`(topic resource-released)`, so a blocked agent can `watch!` it and `weft wait`.
+`weft claim`, `weft release` and `weft claim-check` do the same from a shell.
+
+Configure `weft claim-hook claude` as a Claude `PreToolUse` hook for
+Edit/Write/MultiEdit/NotebookEdit and `weft claim-hook codex` as a Codex
+`PreToolUse` hook. It reads the harness's own `session_id`, so an agent cannot
+choose its identity, and exits 2 naming the holder when another session holds
+the path. It fails open when Weft is down. Shell writes bypass these hooks.
+
 ## Existing sessions and completion messages
 
 `session-send` accepts an existing Emacs ACP buffer name or `codex:THREAD-ID`.
