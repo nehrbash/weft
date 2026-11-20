@@ -119,7 +119,11 @@
                      (error "Wait query failed" (assq-ref reply 'value)))))
              ;; Keep waiting while the daemon restarts; a bad query still fails.
              (lambda (key . args)
-               (if (eq? key 'system-error) '() (apply throw key args)))))
+               (if (or (eq? key 'system-error)
+                       (string-contains (call-with-output-string (lambda (port) (write args port)))
+                                        "Workspace closed without a response"))
+                   '()
+                   (apply throw key args)))))
          (define (report found)
            (let ((found (if workspace?
                             (map (match-lambda ((id from text) `((id . ,id) (from . ,from) (text . ,text))))
