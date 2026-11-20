@@ -47,7 +47,8 @@
     (let ((state (call-with-input-string (assq-ref reply 'value) read)))
       (display
         (scm->json-string
-          `((zones . ,(list->vector
+          `((generation . ,(assq-ref reply 'generation))
+            (zones . ,(list->vector
                        (map (match-lambda
                               ((name type data)
                                `((name . ,(symbol->string name))
@@ -277,12 +278,22 @@
     (("codex-list")
      (display (scm->json-string (call-with-codex codex-list))) (newline) 0)
     (("owner" "archive" id) (owner 'archive (list (string->number id))))
+    (("owner" decision "--generation" generation id expected)
+     (unless (member decision '("approve" "reject")) (error "Expected approve or reject"))
+     (owner 'decide-generation
+       (list generation (string->number id)
+             (call-with-input-string expected
+               (lambda (port)
+                 (let ((value (read port)))
+                   (unless (eof-object? (read port)) (error "Trailing owner proposal content"))
+                   value)))
+             (string->symbol decision))))
     (("owner" decision id expected)
      (unless (member decision '("approve" "reject")) (error "Expected approve or reject"))
      (owner 'decide (list (string->number id) (call-with-input-string expected read)
                          (string->symbol decision))))
     (("eval" code) (evaluate (default-socket-path) code))
     (("eval" path code) (evaluate path code))
-    (_ (display "Usage: weft [standalone | daemon [SOCKET [STATE]] | connect [SOCKET] | eval [SOCKET] CODE | workspace-daemon | connect-workspace | workspace-eval CODE | wait [--workspace] NAME [CURSOR [SECONDS]] | claim HOLDER PATH... | release HOLDER [PATH...] | claim-check SESSION PATH... | claim-hook PROVIDER | owner inspect | owner approve/reject ID EXPECTED | owner archive ID]\n"
+    (_ (display "Usage: weft [standalone | daemon [SOCKET [STATE]] | connect [SOCKET] | eval [SOCKET] CODE | workspace-daemon | connect-workspace | workspace-eval CODE | wait [--workspace] NAME [CURSOR [SECONDS]] | claim HOLDER PATH... | release HOLDER [PATH...] | claim-check SESSION PATH... | claim-hook PROVIDER | owner inspect | owner approve/reject [--generation GENERATION] ID EXPECTED | owner archive ID]\n"
                 (current-error-port))
        2)))

@@ -99,6 +99,21 @@
     (test-assert "collaboration help names the configured endpoint"
       (string-contains (evaluate "workspace-eval" "(workspace-help 'collaboration)")
                        "weft-workspace"))
+    (let* ((view (cdr (run '("owner" "view"))))
+           (generation (assoc-ref view "generation")))
+      (test-assert "owner view reports broker generation" (and (string? generation) (string-prefix? "workspace-" generation)))
+      (evaluate "workspace-eval" "(effect-propose! 'notify \"CLI decision test\")")
+      (test-equal "guarded CLI rejects stale generation" 1
+        (car (run '("owner" "reject" "--generation" "stale" "1" "(notify \"CLI decision test\")"))))
+      (test-equal "guarded CLI rejects altered payload" 1
+        (car (run (list "owner" "reject" "--generation" generation "1" "(notify \"wrong\")"))))
+      (test-equal "guarded CLI rejects exact pending proposal" 0
+        (car (run (list "owner" "reject" "--generation" generation "1" "(notify \"CLI decision test\")"))))
+      (test-equal "guarded CLI decision is single use" 1
+        (car (run (list "owner" "reject" "--generation" generation "1" "(notify \"CLI decision test\")"))))
+      (evaluate "workspace-eval" "(effect-propose! 'notify \"Legacy rejection\")")
+      (test-equal "legacy manual reject remains compatible" 0
+        (car (run '("owner" "reject" "2" "(notify \"Legacy rejection\")")))))
     (bridge "connect-workspace")
     (bridge "connect-room")
     (stop!)

@@ -162,6 +162,15 @@
          (case operation
            ((inspect) (result snapshot))
            ((decide) (result (apply approve! arguments)))
+           ((decide-generation)
+            (match arguments
+              ((expected-generation id expected decision)
+               (unless (and (string? expected-generation)
+                            (<= 1 (string-length expected-generation) 1024)
+                            (equal? expected-generation generation))
+                 (error "Owner decision generation changed; refresh the proposal"))
+               (result (approve! id expected decision)))
+              (_ (error "Expected generation, proposal ID, exact content, and decision"))))
            ((archive)
             (let ((id (car arguments)))
               (unless (memq (assq-ref (assv-ref (assq-ref snapshot 'effects) id) 'state)

@@ -8,6 +8,7 @@
 (define token-path (string-append directory "/token"))
 (define token (make-string 64 #\a))
 (define child #f)
+(define observed-generation #f)
 (call-with-output-file token-path (lambda (port) (display token port)))
 (chmod token-path #o600)
 (define (start!)
@@ -71,12 +72,17 @@
     (test-equal "broker survives malformed owner request" 42 (value "(+ 20 22)"))
     (test-equal "proposal has no automatic effect" "(1)"
       (assq-ref (evaluate "(effect-propose! 'notify \"approved text\")") 'proposals))
+    (set! observed-generation (assq-ref (owner 'inspect) 'generation))
+    (test-equal "guarded decision still requires exact content" 'error
+      (assq-ref (owner 'decide-generation observed-generation 1 '(notify "different text") 'approve) 'status))
+    (test-equal "guarded decision rejects a missing generation" 'error
+      (assq-ref (owner 'decide-generation #f 1 '(notify "approved text") 'approve) 'status))
     (test-equal "changed payload cannot be approved" 'error
       (assq-ref (owner 'decide 1 '(notify "different text") 'approve) 'status))
     (test-equal "owner approves exact content" 'ok
-      (assq-ref (owner 'decide 1 '(notify "approved text") 'approve) 'status))
+      (assq-ref (owner 'decide-generation observed-generation 1 '(notify "approved text") 'approve) 'status))
     (test-equal "approval is single use" 'error
-      (assq-ref (owner 'decide 1 '(notify "approved text") 'approve) 'status))
+      (assq-ref (owner 'decide-generation observed-generation 1 '(notify "approved text") 'approve) 'status))
     (value "(saved-set! 'durable 17)")
     (value "(zone-set! 'status 'text \"ready\")")
     (value "(zone-set! 'count 'metric 17)")
@@ -93,8 +99,21 @@
     (test-equal "room reply keeps message cursor" 2
       (value "(message-post! 'codex 'claude \"Tests ready\")"))
     (test-equal "isolated zones preserve order across restart" '((count metric 17) (status text "ready")) (value "(zone-list)"))
-    (test-equal "pending request survives restart" 'ok
-      (assq-ref (owner 'decide 2 '(notify "pending across restart") 'reject) 'status))
+    (test-assert "broker generation changes across restart"
+      (not (equal? observed-generation (assq-ref (owner 'inspect) 'generation))))
+    (for-each
+      (lambda (decision)
+        (test-equal "old generation cannot approve or reject surviving pending content" 'error
+          (assq-ref (owner 'decide-generation observed-generation 2 '(notify "pending across restart") decision) 'status)))
+      '(approve reject))
+    (test-equal "stale decisions leave the proposal pending" 'pending
+      (assq-ref (assv-ref (assq-ref (call-with-input-string (assq-ref (owner 'inspect) 'value) read) 'effects) 2) 'state))
+    (test-equal "fresh generation can reject the surviving pending proposal" 'ok
+      (assq-ref (owner 'decide-generation (assq-ref (owner 'inspect) 'generation)
+                      2 '(notify "pending across restart") 'reject) 'status))
+    (evaluate "(effect-propose! 'notify \"legacy manual rejection\")")
+    (test-equal "legacy manual rejection remains supported" 'ok
+      (assq-ref (owner 'decide 3 '(notify "legacy manual rejection") 'reject) 'status))
     (test-equal "archive removes decided proposal" 'ok (assq-ref (owner 'archive 1) 'status)))
   stop!)
 (for-each (lambda (name) (delete-file (string-append directory "/" name)))
