@@ -75,6 +75,16 @@ notify `session` and `provider` watchers, `agent-send!` completions notify
 notices and up to 128 watches survive restart. `unwatch!` removes one target or
 all of a subscriber's; `watch-list` inspects them.
 
+Agents that cannot run a background wait, such as Codex, ask for a push:
+`(watch! 'codex-lead '(session "claude:ID") #:deliver "codex:THREAD-ID")`.
+Each notice then queues a prompt on that thread through `weft codex-send`, or
+on an Emacs ACP buffer when the target is a buffer name. The prompt names the
+`notice-inbox` cursor, so notices that arrive before it is sent share one push.
+A target receives at most one push per minute; failures reach the owner inbox;
+`delivery-list` shows pending pushes. A session's first finish after a push is
+recorded as a notice but not pushed onward, so two sessions that watch each
+other cannot ping-pong. Pending pushes do not survive restart.
+
 ## Run
 
 ```sh

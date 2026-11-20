@@ -7,11 +7,12 @@
   #:use-module (srfi srfi-9)
   #:export (make-orchestration install-orchestration-bindings!
             orchestration-tick! orchestration-close!
-            orchestration-snapshot orchestration-restore!))
+            orchestration-snapshot orchestration-restore!
+            delivery-argv delivery-interval))
 
 (define-record-type <orchestration>
   (%make-orchestration manager module next agents turns events seen hooks messages
-                       notifications notifier commands watches notices closed?)
+                       notifications notifier commands watches notices deliveries pushed closed?)
   orchestration?
   (manager manager)
   (module workspace-module)
@@ -27,10 +28,12 @@
   (commands commands set-commands!)
   (watches watches set-watches!)
   (notices notices set-notices!)
+  (deliveries deliveries set-deliveries!)
+  (pushed pushed set-pushed!)
   (closed? closed? set-closed!))
 
 (define (make-orchestration manager module)
-  (%make-orchestration manager module 1 '() '() '() '() '() '() '() #f '() '() '() #f))
+  (%make-orchestration manager module 1 '() '() '() '() '() '() '() #f '() '() '() '() '() #f))
 
 (define (fresh-id! state)
   (let ((id (next-id state))) (set-next-id! state (+ id 1)) id))
@@ -116,14 +119,26 @@
          ((provider agent topic) (symbol? (cadr target)))
          (else #f))))
 
-(define (watch! state subscriber target)
+(define delivery-interval (make-parameter 60))
+
+(define delivery-argv
+  (make-parameter
+    (lambda (target prompt)
+      (if (string-prefix? "codex:" target)
+          (list "weft" "codex-send" (substring target 6) prompt)
+          (list "emacsclient" "--eval" (format #f "(weft-session-send ~s ~s)" target prompt))))))
+
+(define* (watch! state subscriber target #:key deliver)
   (ensure-open state)
   (unless (and (symbol? subscriber) (valid-target? target))
     (error "Expected subscriber symbol and target (session \"ID\"), (provider SYM), (agent SYM) or (topic SYM)"))
-  (let ((watch (list subscriber (copy-tree target))))
-    (unless (member watch (watches state))
-      (when (>= (length (watches state)) 128) (error "Watch limit reached"))
-      (set-watches! state (cons watch (watches state))))
+  (unless (or (not deliver) (and (string? deliver) (<= 1 (string-length deliver) 256)))
+    (error "Delivery target must be codex:THREAD-ID or an ACP buffer name"))
+  (let* ((same? (lambda (watch) (and (eq? subscriber (car watch)) (equal? target (cadr watch)))))
+         (watch `(,subscriber ,(copy-tree target) ,@(if deliver `((deliver . ,deliver)) '()))))
+    (unless (or (any same? (watches state)) (< (length (watches state)) 128))
+      (error "Watch limit reached"))
+    (set-watches! state (cons watch (remove same? (watches state))))
     watch))
 
 (define* (unwatch! state subscriber #:optional target)
@@ -133,16 +148,80 @@
             (watches state)))
   #t)
 
-(define (notify-watchers! state targets kind source text)
+(define (queue-delivery! state target subscriber cursor)
+  (cond
+   ((find (lambda (entry) (and (equal? target (assq-ref entry 'target))
+                               (not (assq-ref entry 'job))))
+          (deliveries state)))
+   ((>= (length (deliveries state)) 32)
+    (owner-post! state (format #f "Delivery to ~a dropped: queue is full" target) #:from 'weft))
+   (else
+    (set-deliveries! state
+      (append (deliveries state)
+              (list (copy-tree `((target . ,target) (subscriber . ,subscriber)
+                                 (cursor . ,cursor) (job . #f)))))))))
+
+(define* (notify-watchers! state targets kind source text #:key (deliver? #t))
+  (let ((matched (filter (lambda (watch) (member (cadr watch) targets)) (reverse (watches state)))))
+    (for-each
+      (lambda (subscriber)
+        (let* ((id (fresh-id! state))
+               (notice `((id . ,id) (subscriber . ,subscriber) (kind . ,kind)
+                         (source . ,source) (text . ,(bounded text 4096)))))
+          (set-notices! state (take (cons notice (notices state))
+                                    (min 128 (+ 1 (length (notices state))))))
+          (when deliver?
+            (for-each
+              (lambda (watch)
+                (let ((target (assq-ref (cddr watch) 'deliver)))
+                  (when (and target (eq? subscriber (car watch)) (not (equal? target source)))
+                    (queue-delivery! state target subscriber (- id 1)))))
+              matched))))
+      (delete-duplicates (map car matched)))))
+
+(define (delivery-prompt entry)
+  (format #f "[weft] A peer you watch has news. On the trusted weft endpoint, read (notice-inbox '~a ~a) and act on it."
+          (assq-ref entry 'subscriber) (assq-ref entry 'cursor)))
+
+(define (deliveries-tick! state)
+  (set-deliveries! state
+    (filter
+      (lambda (entry)
+        (let ((job (assq-ref entry 'job)))
+          (if (not job)
+              #t
+              (let ((status (job-status (manager state) job)))
+                (if (or (assq-ref status 'exit-code) (assq-ref status 'signal))
+                    (begin
+                      (unless (equal? 0 (assq-ref status 'exit-code))
+                        (owner-post! state
+                          (bounded (format #f "Delivery to ~a failed: ~a" (assq-ref entry 'target)
+                                           (assq-ref status 'stderr)) 4096)
+                          #:from 'weft))
+                      (job-forget (manager state) job)
+                      #f)
+                    #t)))))
+      (deliveries state)))
   (for-each
-    (lambda (subscriber)
-      (let ((notice `((id . ,(fresh-id! state)) (subscriber . ,subscriber) (kind . ,kind)
-                      (source . ,source) (text . ,(bounded text 4096)))))
-        (set-notices! state (take (cons notice (notices state))
-                                  (min 128 (+ 1 (length (notices state))))))))
-    (delete-duplicates
-      (filter-map (lambda (watch) (and (member (cadr watch) targets) (car watch)))
-                  (reverse (watches state))))))
+    (lambda (entry)
+      (let* ((target (assq-ref entry 'target))
+             (last (assoc-ref (pushed state) target)))
+        (when (and (not (assq-ref entry 'job))
+                   (< (count (lambda (other) (assq-ref other 'job)) (deliveries state)) 2)
+                   (or (not last) (>= (- (current-time) (car last)) (delivery-interval))))
+          (catch #t
+            (lambda ()
+              (set-field! entry 'job
+                (assq-ref (job-start (manager state) ((delivery-argv) target (delivery-prompt entry))
+                                     #:output-limit 65536) 'id))
+              (set-pushed! state (acons target (list (current-time) #t)
+                                        (alist-delete target (pushed state)))))
+            (lambda (key . args)
+              (set-deliveries! state (delq entry (deliveries state)))
+              (owner-post! state
+                (bounded (format #f "Delivery to ~a failed to start: ~s ~s" target key args) 4096)
+                #:from 'weft))))))
+    (deliveries state)))
 
 (define* (notice-inbox state subscriber #:optional (after 0))
   (unless (and (symbol? subscriber) (exact-integer? after) (>= after 0))
@@ -156,9 +235,15 @@
   (ensure-open state)
   (unless (and (symbol? provider) (or (not session) (string? session)) (string? text))
     (error "Expected provider symbol, session ID string or #f, and text"))
-  (let ((id (owner-post! state text #:from provider)))
+  (let* ((id (owner-post! state text #:from provider))
+         (mark (and session (assoc-ref (pushed state) session)))
+         ;; A session's first finish after a push answers it; pushing that onward
+         ;; lets two sessions that watch each other ping-pong.
+         (reply? (and mark (cadr mark))))
+    (when reply?
+      (set-pushed! state (acons session (list (car mark) #f) (alist-delete session (pushed state)))))
     (notify-watchers! state (cons `(provider ,provider) (if session `((session ,session)) '()))
-                      'turn-finished (or session provider) text)
+                      'turn-finished (or session provider) text #:deliver? (not reply?))
     id))
 
 (define (finish! state turn status text error)
@@ -304,6 +389,7 @@
                 (when (memq (assq-ref (cdr entry) 'state) '(running cancelling))
                   (collect-turn! state (cdr entry))))
               (reverse (turns state)))
+    (deliveries-tick! state)
     (let ((batch (take (events state) (min 4 (length (events state))))))
       (set-events! state (drop (events state) (length batch)))
       (for-each (lambda (event) (dispatch-event! state event)) batch))
@@ -387,7 +473,9 @@
   (bind 'event-off! (lambda (name)
                      (set-hooks! state (alist-delete name (hooks state))) #t))
   (bind 'event-hooks (lambda () (copy-tree (hooks state))))
-  (bind 'watch! (lambda (subscriber target) (watch! state subscriber target)))
+  (bind 'watch! (lambda* (subscriber target #:key deliver)
+                  (watch! state subscriber target #:deliver deliver)))
+  (bind 'delivery-list (lambda () (copy-tree (deliveries state))))
   (bind 'unwatch! (lambda* (subscriber #:optional target) (unwatch! state subscriber target)))
   (bind 'watch-list (lambda () (copy-tree (reverse (watches state)))))
   (bind 'notice-inbox (lambda* (subscriber #:optional (after 0))
