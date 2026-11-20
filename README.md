@@ -16,7 +16,7 @@ alist. CLI and Scheme embedding responses retain their record format.
 
 ## Collaborating across providers
 
-All teammates should use `weft-room` for shared data and peer messages. Its
+All teammates should use `weft-workspace` for shared data and peer messages. Its
 state is separate from the trusted `weft` endpoint. Client-native messaging
 tools do not address Weft agent names.
 
@@ -40,8 +40,8 @@ with rollback. Store related fields in one value when they must recover together
 
 Read the inbox once per evaluation and return. Evaluations are serialized:
 sleeping or polling inside Scheme prevents peers from publishing the result
-being awaited. Wait outside `evaluate`; the isolated room rejects `sleep` and
-`usleep`. Messages are shared room data: they do not
+being awaited. Wait outside `evaluate`; the isolated workspace rejects `sleep` and
+`usleep`. Messages are shared workspace data: they do not
 start a turn, notify the owner, require approval, or wake an idle agent. Sender
 and recipient symbols are cooperative labels, not authenticated identities.
 The latest 128 messages across recipients survive restart; each is limited to
@@ -202,7 +202,7 @@ a property may add `(enum . #("a" "b"))`. `tools/call` checks the arguments,
 then applies the procedure positionally in property order; trailing absent
 arguments are dropped so the procedure's defaults apply. A failure returns an
 `isError` result with the message. Tools are not snapshotted, so define them from
-the initializer. The isolated room has none. `tool-list`, `tool-call` and
+the initializer. The isolated workspace has none. `tool-list`, `tool-call` and
 `tool-remove!` inspect, invoke and remove them.
 
 ## Embedding and boundaries
@@ -216,7 +216,7 @@ an externally owned `#:evaluate` callback taking code and seconds.
 MCP 2025-11-25 accepts `code` and optional `seconds`, defaulting to 30 and limited
 to 50. Output is bounded. Evaluation deadlines are cooperative and do not roll
 back effects or cancel jobs. The maintenance REPL has local-user authority;
-the isolated room below is a separate endpoint. Neither protects against a
+the isolated workspace below is a separate endpoint. Neither protects against a
 host process already running with the owner's account privileges.
 
 ## Recovery and advice
@@ -246,22 +246,24 @@ zero-argument continuation followed by the original arguments. Targets include
 `workspace-evaluate`, `workspace-tick`, and names invoked through `command-invoke`
 or event dispatch. Save advised procedures explicitly for restart recovery.
 
-## Isolated room and owner console
+## Isolated workspace and owner console
 
 ```sh
-weft room-daemon
-weft connect-room
-weft room-eval '(zone-set! (quote status) (quote text) "Ready")'
+weft workspace-daemon
+weft connect-workspace
+weft workspace-eval '(zone-set! (quote status) (quote text) "Ready")'
 weft owner view
 ```
 
-The room requires Linux user namespaces and Bubblewrap. Its long-lived worker
+The workspace requires Linux user namespaces and Bubblewrap. Its long-lived worker
 has restricted Scheme bindings, read-only runtime sources and `/gnu/store`, a
 private temporary directory, and isolated process/network namespaces. It has no
 home directory, owner token, session bus, or host workspace socket. Evaluation
 has allocation and time limits; the worker has a 1 GiB address-space ceiling.
 The host broker stores explicit definitions, values and zones under
 `$XDG_STATE_HOME/weft/room.scm` (default `~/.local/state/weft/room.scm`).
+The `room-daemon`, `connect-room`, and `room-eval` commands remain aliases.
+Both spellings use `room.sock` and `room.scm` to share existing state.
 Ordinary definitions survive connections but not worker restarts.
 
 Load `elisp/weft.el` and run `M-x weft-console`. The Guix package installs it

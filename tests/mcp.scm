@@ -56,6 +56,11 @@
             (vector-length (assoc-ref (assoc-ref (request "tools/list"
                                                           '()) "result")
                                       "tools")))
+(test-assert "trusted endpoint directs collaboration to weft-workspace"
+  (string-contains
+    (assoc-ref (vector-ref (assoc-ref (assoc-ref (request "tools/list" '()) "result")
+                                    "tools") 0) "description")
+    "weft-workspace"))
 (define compact-code "'((alice \"Review ready\") (bob \"Tests pass\"))")
 (define compact-reply
   (assoc-ref (vector-ref (assoc-ref (assoc-ref

@@ -57,7 +57,7 @@
          (else #f))))
 
 (define (owner-request socket token operation . arguments)
-  "Submit an authenticated owner operation over the local room transport."
+  "Submit an authenticated owner operation over the local workspace transport."
   (remote-evaluate socket
     (string-append "WEFT-OWNER "
       (scm->json-string `((token . ,token) (operation . ,(symbol->string operation))
@@ -73,12 +73,12 @@
          (worker-socket (string-append directory "/worker.sock"))
          (manager (make-job-manager))
          (worker #f)
-         (generation (format #f "room-~a-~a" (getpid) (gettimeofday))))
+         (generation (format #f "workspace-~a-~a" (getpid) (gettimeofday))))
     (unless (and (equal? 1 (assq-ref snapshot 'version))
                  (string? token) (>= (string-length token) 64)
                  (= (getuid) (stat:uid (stat token-file)))
                  (zero? (logand #o077 (stat:perms (stat token-file)))))
-      (error "Invalid room snapshot or private owner token"))
+      (error "Invalid workspace snapshot or private owner token"))
     (define (set-field! key value)
       (set! snapshot (acons key value (alist-delete key snapshot))))
     (define (save!) (write-state! state-file snapshot))

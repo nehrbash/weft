@@ -61,7 +61,7 @@
     (add-text-properties start (point) `(weft-zone ,(alist-get 'name zone)))))
 
 (defun weft-refresh ()
-  "Refresh the owner console without evaluating room code."
+  "Refresh the owner console without evaluating workspace code."
   (interactive)
   (let* ((view (json-parse-string (weft--call "owner" "view") :object-type 'alist :array-type 'list))
          (position (point))
@@ -99,9 +99,9 @@
     (goto-char (min position (point-max)))))
 
 (defun weft-evaluate (code)
-  "Evaluate CODE in the isolated shared room."
+  "Evaluate CODE in the isolated shared workspace."
   (interactive "sScheme: ")
-  (message "%s" (string-trim (weft--call "room-eval" code)))
+  (message "%s" (string-trim (weft--call "workspace-eval" code)))
   (weft-refresh))
 
 (defun weft-zone-first ()

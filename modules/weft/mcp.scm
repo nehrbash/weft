@@ -8,7 +8,7 @@
 
 (define %tool
   '((name . "evaluate")
-    (description . "Trusted shared Scheme workspace with local-user authority, no sandbox. (session-list) reports native Claude/Codex session activity; (session-ref ID) reads recent excerpts. For peer collaboration prefer weft-room; its data is separate from this endpoint. (workspace-help 'collaboration) explains message-post!/message-inbox and shared data. (agent-list) discovers Weft-owned agents; agent-send! queues a FUTURE turn, not a live message. Client-native SendMessage does not address these names. Use (workspace-help 'agents) or (workspace-state) for details.")
+    (description . "Trusted shared Scheme workspace with local-user authority, no sandbox. (session-list) reports native Claude/Codex session activity; (session-ref ID) reads recent excerpts. For peer collaboration prefer weft-workspace; its data is separate from this endpoint. (workspace-help 'collaboration) explains message-post!/message-inbox and shared data. (agent-list) discovers Weft-owned agents; agent-send! queues a FUTURE turn, not a live message. Client-native SendMessage does not address these names. Use (workspace-help 'agents) or (workspace-state) for details.")
     (inputSchema (type . "object")
                  (properties (code (type . "string")
                                    (maxLength . 131072))
@@ -58,7 +58,7 @@
   (define initialized? #f)
   (define description
     (if isolated?
-        "Shared room for cross-provider collaboration, isolated with Bubblewrap. All teammates should use this endpoint; trusted weft has separate state. Start with (workspace-help 'collaboration). (message-post! 'alice 'bob \"text\") and (message-inbox 'bob) exchange messages; Read once and return; wait OUTSIDE evaluate, never sleep or poll in a Scheme loop. No automatic wakeup. (saved-set! 'name data)/(saved-ref 'name) share data; zone-set!/zone-ref publish visible results. Names are cooperative labels, not authenticated identities. External effects require effect-propose! and exact-content owner approval. Use (workspace-help 'effects) for details."
+        "Shared workspace for cross-provider collaboration, isolated with Bubblewrap. All teammates should use this endpoint; trusted weft has separate state. Start with (workspace-help 'collaboration). (message-post! 'alice 'bob \"text\") and (message-inbox 'bob) exchange messages; Read once and return; wait OUTSIDE evaluate, never sleep or poll in a Scheme loop. No automatic wakeup. (saved-set! 'name data)/(saved-ref 'name) share data; zone-set!/zone-ref publish visible results. Names are cooperative labels, not authenticated identities. External effects require effect-propose! and exact-content owner approval. Use (workspace-help 'effects) for details."
         (assq-ref %tool 'description)))
   (define (result id value)
     `((jsonrpc . "2.0") (id . ,id) (result . ,value)))
@@ -119,7 +119,8 @@
         (result id
                 `((protocolVersion . "2025-11-25")
                   (capabilities (tools (listChanged . #f)))
-                  (serverInfo (name . "weft") (version . "0.7.0"))
+                  (serverInfo (name . ,(if isolated? "weft-workspace" "weft"))
+                              (version . "0.7.1"))
                   (instructions . ,description))))
        ((equal? method "ping") (result id '()))
        ((not initialized?) (rpc-error id -32002 "Initialize first"))

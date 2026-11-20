@@ -10,3 +10,4 @@ check:
 	guile --no-auto-compile -L modules tests/daemon.scm
 	guile --no-auto-compile -L modules tests/mcp.scm
 	guile --no-auto-compile -L modules tests/isolated.scm
+	guile --no-auto-compile -L modules tests/cli.scm
