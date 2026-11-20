@@ -88,5 +88,16 @@
 (workspace-close other)
 (workspace-close workspace)
 (workspace-close workspace)
+(define soak (make-workspace))
+(test-equal "thousands of evaluations do not exhaust GC root sets" "3"
+  (let loop ((n 0) (last #f))
+    (if (= n 4000) (assq-ref last 'value)
+        (loop (+ n 1) (workspace-evaluate soak "(+ 1 2)")))))
+(test-equal "multiple values are returned together" "(1 2)"
+  (assq-ref (workspace-evaluate soak "(values 1 2)") 'value))
+(test-equal "definitions persist between interpreted evaluations" "42"
+  (begin (workspace-evaluate soak "(define soak-answer 42)")
+         (assq-ref (workspace-evaluate soak "soak-answer") 'value)))
+(workspace-close soak)
 (test-end "runtime")
 (exit (if (zero? (test-runner-fail-count runner)) 0 1))

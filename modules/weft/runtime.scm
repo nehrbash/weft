@@ -1,5 +1,4 @@
 (define-module (weft runtime)
-  #:use-module (ares evaluation eval)
   #:use-module (ice-9 sandbox)
   #:use-module (rnrs io ports)
   #:use-module (srfi srfi-9)
@@ -335,18 +334,29 @@
   (checkpoint! workspace))
 
 (define (evaluate-source workspace code result-port)
-  (let* ((request `(("code" . ,code)
-                    ("ns" . ,(object->string
-                              (module-name (workspace-module workspace))))))
-         (result ((evaluation-thunk request)))
-         (kind (assq-ref result 'result-type)))
-    (case kind
-      ((value multiple-values)
-       (write (assq-ref result 'eval-value) result-port)
-       'ok)
-      (else
-       (write (assq-ref result 'exception-value) result-port)
-       'error))))
+  ;; Interpret rather than compile: each Guile compile registers a GC root set
+  ;; that is never freed, and libgc aborts the daemon after about 1750 of them.
+  (let ((module (workspace-module workspace)))
+    (with-exception-handler
+      (lambda (exception)
+        (write exception result-port)
+        'error)
+      (lambda ()
+        (call-with-values
+          (lambda ()
+            (save-module-excursion
+              (lambda ()
+                (set-current-module module)
+                (let ((port (open-input-string code)))
+                  (let loop ((results (list *unspecified*)))
+                    (let ((form (read port)))
+                      (if (eof-object? form)
+                          (apply values results)
+                          (loop (call-with-values (lambda () (eval form module)) list)))))))))
+          (lambda results
+            (write (if (= 1 (length results)) (car results) results) result-port)
+            'ok)))
+      #:unwind? #t)))
 
 (define (evaluate-with-ports workspace code seconds output result-port)
   (call-with-time-limit
